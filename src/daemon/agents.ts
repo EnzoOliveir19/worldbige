@@ -60,6 +60,26 @@ export function parseModel(value: unknown): AgentModel {
   return typeof value === 'string' && MODELS.has(value) ? (value as AgentModel) : null
 }
 
+/**
+ * A janela do agente no canvas, em coordenadas de mundo (antes do zoom).
+ *
+ * É estado do daemon e não do front: o front é descartável por desenho, então
+ * arrastar uma janela e recarregar a aba não pode desfazer o arrasto.
+ */
+export type AgentLayout = {
+  x: number
+  y: number
+  w: number
+  h: number
+  /** recolhida vira card com status e último resumo */
+  collapsed: boolean
+  /** ordem de empilhamento; clicar numa janela a traz pra frente */
+  z: number
+}
+
+/** Quantas tintas de identidade existem. O front tem a paleta correspondente. */
+export const TINT_COUNT = 6
+
 export type Agent = {
   id: string
   name: string
@@ -76,6 +96,12 @@ export type Agent = {
   model: AgentModel
   /** ferramenta esperando aprovação, quando o status é `needs_you` */
   waitingTool: string | null
+  /** posição e tamanho da janela no canvas */
+  layout: AgentLayout
+  /** quem abriu este agente; vira a seta lead→helper no canvas */
+  parentId: string | null
+  /** índice na paleta de identidade: ponto na gaveta, linha e fio da janela */
+  tint: number
 }
 
 type Subscriber = (chunk: string) => void
@@ -92,6 +118,78 @@ type Live = {
 }
 
 const agents = new Map<string, Live>()
+
+// ---------- lugar no canvas ----------
+// Um agente que nasce em cima do anterior obriga a arrastar antes de usar, então
+// o daemon já o coloca onde a leitura do run é a natural: helper abaixo de quem
+// o abriu, irmão à direita do irmão anterior, raiz à direita da última raiz.
+
+const WIN_W = 840
+const WIN_H = 620
+const GAP_X = 72
+const GAP_Y = 120
+
+function placeAgent(parentId: string | null): { x: number; y: number } {
+  const all = [...agents.values()].map((l) => l.agent)
+  const parent = parentId ? all.find((a) => a.id === parentId) : undefined
+
+  if (parent) {
+    const siblings = all.filter((a) => a.parentId === parent.id)
+    const y = parent.layout.y + parent.layout.h + GAP_Y
+    if (!siblings.length) return { x: parent.layout.x, y }
+    // Irmão vai à direita do irmão mais à direita, na mesma faixa.
+    const rightmost = siblings.reduce((m, a) => Math.max(m, a.layout.x + a.layout.w), -Infinity)
+    return { x: rightmost + GAP_X, y }
+  }
+
+  const roots = all.filter((a) => !a.parentId)
+  if (!roots.length) return { x: 0, y: 0 }
+  const rightmost = roots.reduce((m, a) => Math.max(m, a.layout.x + a.layout.w), -Infinity)
+  return { x: rightmost + GAP_X, y: roots[0]?.layout.y ?? 0 }
+}
+
+/** A tinta livre mais baixa; só repete quando a paleta se esgota. */
+function nextTint(): number {
+  const used = new Set([...agents.values()].map((l) => l.agent.tint))
+  for (let i = 0; i < TINT_COUNT; i++) if (!used.has(i)) return i
+  return agents.size % TINT_COUNT
+}
+
+function topZ(): number {
+  let z = 0
+  for (const l of agents.values()) z = Math.max(z, l.agent.layout.z)
+  return z
+}
+
+/**
+ * Move, redimensiona, recolhe ou traz pra frente — o que o arrasto do front
+ * produziu. Só persiste se algo mudou mesmo: arrastar emite muitos eventos.
+ */
+export function setLayout(id: string, patch: Partial<AgentLayout>): Agent | null {
+  const live = agents.get(id)
+  if (!live) return null
+  const before = live.agent.layout
+  const next: AgentLayout = {
+    x: Number.isFinite(patch.x) ? (patch.x as number) : before.x,
+    y: Number.isFinite(patch.y) ? (patch.y as number) : before.y,
+    w: Number.isFinite(patch.w) ? Math.max(360, patch.w as number) : before.w,
+    h: Number.isFinite(patch.h) ? Math.max(180, patch.h as number) : before.h,
+    collapsed: typeof patch.collapsed === 'boolean' ? patch.collapsed : before.collapsed,
+    // `z: -1` é o pedido de "traz pra frente" sem o front saber o topo atual.
+    z: patch.z === -1 ? topZ() + 1 : Number.isFinite(patch.z) ? (patch.z as number) : before.z,
+  }
+  const same =
+    next.x === before.x &&
+    next.y === before.y &&
+    next.w === before.w &&
+    next.h === before.h &&
+    next.collapsed === before.collapsed &&
+    next.z === before.z
+  if (same) return live.agent
+  live.agent.layout = next
+  persist()
+  return live.agent
+}
 
 /**
  * O ambiente de um agente, sem os marcadores da sessão que abriu o daemon.
@@ -157,6 +255,9 @@ function persist(): void {
       rows: agent.rows,
       sessionId: agent.sessionId,
       model: agent.model,
+      layout: agent.layout,
+      parentId: agent.parentId,
+      tint: agent.tint,
     })),
   }
   saveState(snapshot)
@@ -166,11 +267,12 @@ function persist(): void {
 
 export function restoreAgents(): number {
   const state = loadState()
+  let index = 0
   for (const p of state.agents) {
     if (agents.has(p.id)) continue
     const { term, serializer } = makeScreen(p.cols, p.rows)
     agents.set(p.id, {
-      agent: toAgent(p),
+      agent: toAgent(p, index++),
       pty: null,
       subscribers: new Set(),
       term,
@@ -181,7 +283,7 @@ export function restoreAgents(): number {
   return state.agents.length
 }
 
-function toAgent(p: PersistedAgent): Agent {
+function toAgent(p: PersistedAgent, index: number): Agent {
   return {
     id: p.id,
     name: p.name,
@@ -198,6 +300,18 @@ function toAgent(p: PersistedAgent): Agent {
     live: false,
     model: p.model ?? null,
     waitingTool: null,
+    // Estado gravado antes da unidade 3 não tem lugar no canvas: em vez de
+    // empilhar todo mundo na origem, a ficha velha entra numa fileira.
+    layout: p.layout ?? {
+      x: index * (WIN_W + GAP_X),
+      y: 0,
+      w: WIN_W,
+      h: WIN_H,
+      collapsed: false,
+      z: index,
+    },
+    parentId: p.parentId ?? null,
+    tint: typeof p.tint === 'number' ? p.tint : index % TINT_COUNT,
   }
 }
 
@@ -212,6 +326,12 @@ export type SpawnOptions = {
   args?: string[]
   /** política de permissão do run type (unidade 5) */
   permissions?: Record<string, unknown>
+  /** quem abriu este agente; vira a seta no canvas (o `after` da unidade 4) */
+  parentId?: string | null
+  /** lugar no canvas; sem isso o daemon escolhe (abaixo do pai, à direita do irmão) */
+  layout?: Partial<AgentLayout>
+  /** tinta de identidade; sem isso pega a primeira livre */
+  tint?: number
 }
 
 export function createAgent(opts: SpawnOptions = {}): Agent {
@@ -227,6 +347,18 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
   // aceita, o card já nasce dizendo isso em vez de mentir `starting`.
   const trusted = isTrusted(cwd)
 
+  // Um pai que não existe mais não vira seta pendurada no vazio.
+  const parentId = opts.parentId && agents.has(opts.parentId) ? opts.parentId : null
+  const spot = placeAgent(parentId)
+  const layout: AgentLayout = {
+    x: opts.layout?.x ?? spot.x,
+    y: opts.layout?.y ?? spot.y,
+    w: opts.layout?.w ?? WIN_W,
+    h: opts.layout?.h ?? WIN_H,
+    collapsed: opts.layout?.collapsed ?? false,
+    z: opts.layout?.z ?? topZ() + 1,
+  }
+
   const agent: Agent = {
     id,
     name: opts.name?.trim() || `agente-${id.slice(0, 4)}`,
@@ -241,6 +373,9 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
     live: true,
     model,
     waitingTool: null,
+    layout,
+    parentId,
+    tint: typeof opts.tint === 'number' ? opts.tint : nextTint(),
   }
 
   const { term, serializer } = makeScreen(cols, rows)
@@ -312,10 +447,20 @@ export function resumeAgent(id: string): Agent | null {
     rows: old.rows,
     model: old.model,
     args: ['--resume', old.sessionId],
+    // A janela não pode pular de lugar só porque a sessão reabriu: o canvas é
+    // memória espacial, e um card que se move sozinho apaga o que você lembrava.
+    layout: old.layout,
+    parentId: old.parentId,
+    tint: old.tint,
   })
   // A ficha nova herda a identidade da antiga: pro front é o mesmo agente
   // voltando, não um segundo card.
   resumed.sessionId = old.sessionId
+  // Os filhos apontavam pro id antigo; sem isto as setas deles ficariam penduradas
+  // num agente que não existe mais.
+  for (const l of agents.values()) {
+    if (l.agent.parentId === id) l.agent.parentId = resumed.id
+  }
   removeAgent(id)
   persist()
   console.log(`↻ agente ${resumed.name} resumido de ${old.sessionId.slice(0, 8)}`)
@@ -485,6 +630,11 @@ export function removeAgent(id: string): boolean {
   const live = agents.get(id)
   if (!live) return false
   stopAgent(id)
+  // Quem dependia dele passa a depender de quem o abriu: a cadeia encurta em vez
+  // de arrebentar, e nenhuma seta fica apontando pro vazio.
+  for (const other of agents.values()) {
+    if (other.agent.parentId === id) other.agent.parentId = live.agent.parentId
+  }
   for (const send of live.subscribers) {
     send('\r\n\x1b[2m[worldbige] agente removido.\x1b[0m\r\n')
   }

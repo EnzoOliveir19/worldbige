@@ -1,6 +1,11 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
+// As fontes são servidas junto com o app, não por CDN: o worldbige roda em
+// localhost e precisa abrir igual com a internet fora do ar. `full` do Fraunces
+// traz os eixos ópticos (opsz, SOFT, WONK) que os títulos usam.
+import '@fontsource-variable/fraunces/full.css'
+import '@fontsource-variable/jetbrains-mono'
 import './styles.css'
 
 const root = document.getElementById('root')

@@ -1,225 +1,398 @@
-// Front mínimo das unidades 1 e 2: abrir um agente, usar a TUI do Claude num
-// xterm e ver o scrollback voltar ao reabrir a aba. O canvas infinito, as
-// janelas arrastáveis e a gaveta entram na unidade 3 — inclusive a alça de
-// redimensionar, que lá passa a ser da janela inteira e não do terminal.
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { AgentTerminal } from './AgentTerminal'
+// O canvas: janelas de agente num campo infinito, ligadas por quem abriu quem,
+// com a gaveta à esquerda contando o run.
+//
+// Três coisas moram aqui e em nenhum outro lugar: a câmera, quem está em foco,
+// e a tradução entre o que o daemon sabe (a lista de agentes) e o que a tela
+// mostra (painéis, inclusive os que ainda estão nascendo).
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AgentWindow } from './AgentWindow'
+import { Drawer } from './Drawer'
+import { Canvas } from './canvas/Canvas'
+import { Arrows } from './canvas/Arrows'
+import { WIN_H, WIN_W, placeNew, rectOf } from './canvas/geometry'
+import {
+  FOCUS_Z,
+  IDENTITY,
+  boundsOf,
+  centerRect,
+  fitRect,
+  tweenCamera,
+  type Camera,
+} from './canvas/viewport'
 import {
   createAgent,
   deleteAgent,
   fetchAgents,
   fetchHealth,
-  MODEL_OPTIONS,
+  patchLayout,
   resumeAgent,
-  subscribeAgents,
   stopAgent,
+  subscribeAgents,
   type Agent,
+  type AgentLayout,
   type Health,
 } from './transport'
 
-/** Um painel na tela. `agent` é null enquanto o terminal ainda está medindo. */
-type Panel = { key: string; agent: Agent | null; cwd: string; model: string }
+/** Largura que a gaveta rouba do viewport ao enquadrar. */
+const DRAWER_W = 268
+const RAIL_W = 56
+
+/**
+ * Um painel é uma janela na tela.
+ *
+ * Uma janela que este navegador abriu nasce antes do agente: ela aparece como
+ * fantasma, o terminal dentro dela mede a si mesmo, e só então o agente é criado
+ * com essas dimensões. A chave do painel nunca muda, que é o que impede o React
+ * de remontar o terminal quando o fantasma vira agente de verdade — e uma
+ * remontagem criaria um segundo agente.
+ *
+ * A lista de painéis é DERIVADA, não guardada: fantasmas locais primeiro, e
+ * depois os agentes que nenhum fantasma reivindicou. Guardá-la abria uma corrida
+ * que dava pra ver — o daemon anuncia o agente novo pelo WebSocket antes de a
+ * resposta do POST chegar aqui, e por um instante existiam duas janelas do mesmo
+ * agente, uma por cima da outra.
+ */
+type Panel = { key: string; agentId: string | null; ghost: Agent }
+
+/** Uma janela que este navegador abriu e que ainda está virando agente. */
+type Ghost = { key: string; agentId: string | null; agent: Agent }
+
+function ghostAgent(key: string, layout: AgentLayout, cwd: string, model: string): Agent {
+  return {
+    id: key,
+    name: 'abrindo…',
+    cwd: cwd || '…',
+    status: 'starting',
+    createdAt: Date.now(),
+    lastSignalAt: Date.now(),
+    exitCode: null,
+    cols: 0,
+    rows: 0,
+    sessionId: null,
+    live: false,
+    model: (model || null) as Agent['model'],
+    waitingTool: null,
+    layout,
+    parentId: null,
+    tint: 0,
+  }
+}
 
 export function App() {
-  const [panels, setPanels] = useState<Panel[]>([])
+  const [agents, setAgents] = useState<Agent[]>([])
+  const [ghosts, setGhosts] = useState<Ghost[]>([])
   const [health, setHealth] = useState<Health | null>(null)
-  const [cwd, setCwd] = useState('')
-  const [model, setModel] = useState('')
+  const [camera, setCamera] = useState<Camera>(IDENTITY)
+  const [focusedId, setFocusedId] = useState<string | null>(null)
+  const [drawerOpen, setDrawerOpen] = useState(true)
+  const [searchTick, setSearchTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
-  // O que estava escolhido no momento do clique, lido quando o painel resolver.
-  const pending = useRef<Map<string, { cwd: string; model: string }>>(new Map())
+  const [now, setNow] = useState(() => Date.now())
+  /** posição durante um arrasto: ainda não foi pro daemon */
+  const [overrides, setOverrides] = useState<Record<string, Partial<AgentLayout>>>({})
 
-  const refreshHealth = useCallback(() => {
-    fetchHealth().then(setHealth).catch(() => undefined)
-  }, [])
+  const viewRef = useRef<HTMLDivElement | null>(null)
+  const cancelTween = useRef<() => void>(() => undefined)
+  // A câmera corrente num ref: o tween precisa do ponto de partida sem virar
+  // dependência de todo callback que mexe nela.
+  const camRef = useRef(camera)
+  camRef.current = camera
+  // O que estava escolhido no clique, lido quando o painel resolver.
+  const pending = useRef<Map<string, { cwd: string; model: string; parentId: string | null }>>(
+    new Map(),
+  )
 
-  // Quem sabe quem está vivo é o daemon. Agentes que ele conhece e a tela não
-  // mostra entram como painéis já resolvidos.
-  const reload = useCallback(() => {
-    fetchAgents()
-      .then((list) => {
-        setPanels((prev) => {
-          const known = new Set(prev.map((p) => p.agent?.id).filter(Boolean))
-          const added = list
-            .filter((a) => !known.has(a.id))
-            .map((a) => ({ key: a.id, agent: a, cwd: a.cwd, model: a.model ?? '' }))
-          const updated = prev.map((p) =>
-            p.agent ? { ...p, agent: list.find((a) => a.id === p.agent?.id) ?? p.agent } : p,
-          )
-          return [...updated, ...added]
-        })
-      })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-    refreshHealth()
-  }, [refreshHealth])
+  // ---------- o que o daemon sabe ----------
 
-  // Casa a lista do daemon com os painéis na tela, preservando os que ainda
-  // estão medindo (agent: null).
-  const merge = useCallback((list: Agent[]) => {
-    setPanels((prev) => {
-      const known = new Set(prev.map((p) => p.agent?.id).filter(Boolean))
-      const added = list
-        .filter((a) => !known.has(a.id))
-        .map((a) => ({ key: a.id, agent: a, cwd: a.cwd, model: a.model ?? '' }))
-      const updated = prev.map((p) =>
-        p.agent ? { ...p, agent: list.find((a) => a.id === p.agent?.id) ?? p.agent } : p,
-      )
-      return [...updated, ...added]
+  const sync = useCallback((list: Agent[]) => {
+    setAgents(list)
+    // Um fantasma que já virou agente e cujo agente sumiu (fechado, ou trocado
+    // por outro no resume) cumpriu o seu papel: sai, e a janela que sobrar é a
+    // do agente de verdade.
+    setGhosts((prev) => {
+      const ids = new Set(list.map((a) => a.id))
+      const kept = prev.filter((g) => !g.agentId || ids.has(g.agentId))
+      return kept.length === prev.length ? prev : kept
     })
   }, [])
 
+  const panels = useMemo<Panel[]>(() => {
+    const claimed = new Set(ghosts.map((g) => g.agentId).filter(Boolean))
+    return [
+      ...ghosts.map((g) => ({ key: g.key, agentId: g.agentId, ghost: g.agent })),
+      ...agents.filter((a) => !claimed.has(a.id)).map((a) => ({ key: a.id, agentId: a.id, ghost: a })),
+    ]
+  }, [ghosts, agents])
+
   useEffect(() => {
-    reload()
-    // O estado chega empurrado pelo daemon: o status muda na hora, sem poll.
-    const off = subscribeAgents(merge)
-    // Poll lento só de rede de segurança, pro caso de o canal cair sem avisar.
-    const t = setInterval(refreshHealth, 10000)
+    fetchAgents().then(sync).catch(() => undefined)
+    fetchHealth().then(setHealth).catch(() => undefined)
+    const off = subscribeAgents(sync)
+    const tick = setInterval(() => setNow(Date.now()), 1000)
+    const slow = setInterval(() => {
+      fetchHealth().then(setHealth).catch(() => undefined)
+    }, 10_000)
     return () => {
       off()
-      clearInterval(t)
+      clearInterval(tick)
+      clearInterval(slow)
     }
-  }, [reload, merge, refreshHealth])
+  }, [sync])
 
-  const onNew = () => {
-    setError(null)
-    const key = crypto.randomUUID()
-    pending.current.set(key, { cwd: cwd.trim(), model })
-    setPanels((prev) => [
-      ...prev,
-      { key, agent: null, cwd: cwd.trim() || '(raiz dos repos)', model },
-    ])
+  // A verdade na tela: o que o daemon disse, com o arrasto em curso por cima.
+  const shown = useMemo(() => {
+    const byId = new Map(agents.map((a) => [a.id, a]))
+    return panels.map((p) => {
+      const base = (p.agentId ? byId.get(p.agentId) : undefined) ?? p.ghost
+      const over = overrides[base.id]
+      return over ? { ...base, layout: { ...base.layout, ...over } } : base
+    })
+  }, [panels, agents, overrides])
+
+  // ---------- câmera ----------
+
+  const viewport = () => {
+    const el = viewRef.current
+    return { w: el?.clientWidth ?? window.innerWidth, h: el?.clientHeight ?? window.innerHeight }
   }
 
   /**
-   * Chamado pelo terminal DEPOIS de medir. É aqui que o agente nasce, já com
-   * as dimensões certas — por isso o primeiro attach não precisa de resize.
+   * Voa até a câmera que `make` calcular. A área livre exclui a gaveta: medir
+   * pelo viewport inteiro esconderia metade da janela atrás dela.
+   */
+  const flyTo = useCallback(
+    (make: (view: { w: number; h: number }) => Camera) => {
+      const inset = drawerOpen ? DRAWER_W : RAIL_W
+      const view = viewport()
+      const to = make({ w: Math.max(240, view.w - inset), h: view.h })
+      to.x += inset
+      cancelTween.current()
+      cancelTween.current = tweenCamera(camRef.current, to, setCamera)
+    },
+    [drawerOpen],
+  )
+
+  /**
+   * O teclado passa a ser desta janela e ela vem pra frente — sem mexer na
+   * câmera. É o que um clique dentro do terminal faz quando o zoom já está em 1:
+   * ninguém quer a tela voando no meio de uma seleção de texto.
+   */
+  const touch = useCallback(
+    (id: string) => {
+      setFocusedId(id)
+      // `z: -1` é "topo": quem sabe qual é o topo é o daemon, que vê todas elas.
+      if (agents.some((a) => a.id === id)) void patchLayout(id, { z: -1 }).catch(() => undefined)
+    },
+    [agents],
+  )
+
+  /** Leva a câmera até a janela e entrega o teclado a ela. Pousa em zoom 1. */
+  const goTo = useCallback(
+    (id: string) => {
+      const agent = shown.find((a) => a.id === id)
+      if (!agent) return
+      touch(id)
+      flyTo((view) => centerRect(rectOf(agent), view, FOCUS_Z))
+    },
+    [shown, touch, flyTo],
+  )
+
+  const fitAll = useCallback(() => {
+    const box = boundsOf(shown.map(rectOf))
+    setFocusedId(null)
+    // Sair do terminal é parte do gesto: `Ctrl+Shift+F` é "me tira daqui e me
+    // mostra o run", e o teclado tem que sair junto.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    if (!box) {
+      cancelTween.current()
+      setCamera(IDENTITY)
+      return
+    }
+    flyTo((view) => fitRect(box, view, 72, 1))
+  }, [shown, flyTo])
+
+  // Os atalhos são capturados antes do xterm: dentro de um terminal em foco,
+  // qualquer tecla seria consumida pela sessão e o atalho nunca chegaria aqui.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || !e.shiftKey || e.altKey) return
+      const key = e.key.toLowerCase()
+      if (key === 'f') {
+        e.preventDefault()
+        e.stopPropagation()
+        fitAll()
+      } else if (key === 'b') {
+        e.preventDefault()
+        e.stopPropagation()
+        setDrawerOpen((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [fitAll])
+
+  // ---------- abrir, mover, fechar ----------
+
+  const openAgent = useCallback(
+    (input: { cwd: string; model: string; parentId?: string | null }) => {
+      setError(null)
+      const key = crypto.randomUUID()
+      const parentId = input.parentId ?? null
+      const spot = placeNew(shown, parentId)
+      const layout: AgentLayout = { ...spot, w: WIN_W, h: WIN_H, collapsed: false, z: 999 }
+      pending.current.set(key, { cwd: input.cwd, model: input.model, parentId })
+      setGhosts((prev) => [
+        ...prev,
+        { key, agentId: null, agent: ghostAgent(key, layout, input.cwd, input.model) },
+      ])
+      setFocusedId(key)
+      flyTo((view) => centerRect({ ...spot, w: WIN_W, h: WIN_H }, view, FOCUS_Z))
+    },
+    [shown, flyTo],
+  )
+
+  /**
+   * Chamado pelo terminal DEPOIS de medir: é aqui que o agente nasce, já com as
+   * dimensões certas — por isso o primeiro attach não precisa de resize, e sem
+   * resize a TUI não repinta.
    */
   const resolveFor = useCallback(
-    (key: string) =>
+    (panel: Panel) =>
       async (cols: number, rows: number): Promise<string | null> => {
-        const existing = panels.find((p) => p.key === key)?.agent
-        if (existing) return existing.id
-
-        const want = pending.current.get(key) ?? { cwd: '', model: '' }
+        if (panel.agentId) return panel.agentId
+        const want = pending.current.get(panel.key)
+        if (!want) return null
         try {
           const agent = await createAgent({
             cols,
             rows,
             ...(want.cwd ? { cwd: want.cwd } : {}),
             ...(want.model ? { model: want.model } : {}),
+            ...(want.parentId ? { parentId: want.parentId } : {}),
+            // Sem o `z`: o lugar na tela é do front, a ordem de empilhamento é
+            // do daemon, que é quem vê todas as janelas.
+            layout: {
+              x: panel.ghost.layout.x,
+              y: panel.ghost.layout.y,
+              w: panel.ghost.layout.w,
+              h: panel.ghost.layout.h,
+            },
           })
-          pending.current.delete(key)
-          setPanels((prev) => prev.map((p) => (p.key === key ? { ...p, agent, cwd: agent.cwd } : p)))
+          pending.current.delete(panel.key)
+          setGhosts((prev) =>
+            prev.map((g) => (g.key === panel.key ? { ...g, agentId: agent.id } : g)),
+          )
+          setFocusedId((id) => (id === panel.key ? agent.id : id))
           return agent.id
         } catch (e: unknown) {
           const message = e instanceof Error ? e.message : String(e)
           setError(message)
-          setPanels((prev) => prev.filter((p) => p.key !== key))
+          pending.current.delete(panel.key)
+          setGhosts((prev) => prev.filter((g) => g.key !== panel.key))
           throw e
         }
       },
-    [panels],
+    [],
   )
 
-  const onStop = async (id: string) => {
-    await stopAgent(id)
-    reload()
-  }
+  const onLayout = useCallback((id: string, patch: Partial<AgentLayout>, commit: boolean) => {
+    setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
+    if (!commit) return
+    void patchLayout(id, patch)
+      .catch(() => undefined)
+      .finally(() => {
+        // O daemon respondeu e já empurrou a lista nova: o local sai de cena.
+        setOverrides((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+      })
+  }, [])
 
-  const onResume = async (id: string) => {
+  const onRemove = useCallback(async (panel: Panel) => {
+    pending.current.delete(panel.key)
+    setGhosts((prev) => prev.filter((g) => g.key !== panel.key))
+    if (panel.agentId) await deleteAgent(panel.agentId)
+  }, [])
+
+  const onResume = useCallback(async (id: string) => {
     setError(null)
     try {
       await resumeAgent(id)
-      // A ficha velha é substituída por uma nova: recarrega e remonta o painel.
-      setPanels((prev) => prev.filter((p) => p.agent?.id !== id))
-      reload()
+      const list = await fetchAgents()
+      sync(list)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     }
-  }
-
-  const onRemove = async (key: string, id?: string) => {
-    if (id) await deleteAgent(id)
-    pending.current.delete(key)
-    setPanels((prev) => prev.filter((p) => p.key !== key))
-  }
+  }, [sync])
 
   return (
-    <div className="app">
-      <header className="bar">
-        <strong>worldbige</strong>
-        <input
-          className="cwd"
-          placeholder={health ? `repo em ${health.reposRoot} (vazio = a própria raiz)` : 'repo…'}
-          value={cwd}
-          onChange={(e) => setCwd(e.target.value)}
-          spellCheck={false}
-        />
-        <select
-          className="model"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          title="modelo do agente"
-        >
-          {MODEL_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-        <button onClick={onNew}>novo agente</button>
-        <button onClick={reload}>recarregar</button>
-      </header>
+    <div className={`app${drawerOpen ? ' drawer-open' : ''}`} ref={viewRef}>
+      <Canvas camera={camera} onCamera={setCamera} onBackground={() => setFocusedId(null)}>
+        <Arrows agents={shown} />
+        {panels.map((panel, i) => {
+          const agent = shown[i] as Agent
+          return (
+            <AgentWindow
+              key={panel.key}
+              agent={agent}
+              zoom={camera.z}
+              focused={focusedId === agent.id || focusedId === panel.key}
+              onFocus={() => goTo(agent.id)}
+              onTouch={() => touch(agent.id)}
+              onReframe={() => goTo(agent.id)}
+              onLayout={(patch, commit) =>
+                panel.agentId ? onLayout(panel.agentId, patch, commit) : undefined
+              }
+              onHelper={() =>
+                openAgent({
+                  cwd: '',
+                  // O helper herda o modelo de quem o abriu. Sem isso ele cairia
+                  // no padrão da conta, e um lead em haiku abriria helpers em
+                  // opus sem ninguém pedir. O roteamento por tabela, que é quem
+                  // vai decidir isso de verdade, chega na unidade 4.
+                  model: agent.model ?? '',
+                  parentId: agent.id,
+                })
+              }
+              onStop={() => void stopAgent(agent.id)}
+              onResume={() => void onResume(agent.id)}
+              onRemove={() => void onRemove(panel)}
+              resolveAgent={resolveFor(panel)}
+            />
+          )
+        })}
+      </Canvas>
 
-      {error && <p className="error">{error}</p>}
+      <Drawer
+        open={drawerOpen}
+        onToggle={() => setDrawerOpen((v) => !v)}
+        onOpenSearch={() => {
+          setDrawerOpen(true)
+          setSearchTick((n) => n + 1)
+        }}
+        searchTick={searchTick}
+        agents={shown}
+        health={health}
+        focusedId={focusedId}
+        onGoTo={goTo}
+        onNew={(input) => openAgent(input)}
+        now={now}
+      />
 
-      {panels.length === 0 && (
-        <p className="empty">
-          Nenhum agente. Abra um — e, pro teste do scrollback, deixe o Claude responder algo, feche
-          a aba, espere a resposta terminar sem ninguém olhando, e reabra. O conteúdo tem que voltar
-          igual, sem repetir, quantas vezes você reabrir.
+      {error && (
+        <p className="toast" role="alert" onClick={() => setError(null)}>
+          {error}
         </p>
       )}
 
-      {panels.map((p) => (
-        <section className="agent" key={p.key}>
-          <div className="agent-head">
-            <span className="name">{p.agent?.name ?? 'medindo…'}</span>
-            {p.agent && (
-              <span className={`status status-${p.agent.status}`}>
-                {p.agent.status}
-                {p.agent.waitingTool ? `: ${p.agent.waitingTool}` : ''}
-              </span>
-            )}
-            <span className="meta">{p.cwd}</span>
-            <span className="meta">{p.agent?.model || p.model || 'modelo da conta'}</span>
-            {p.agent?.sessionId && (
-              <span className="meta" title="session id — é o que o resume usa">
-                {p.agent.sessionId.slice(0, 8)}
-              </span>
-            )}
-            {p.agent && (
-              <span className="meta">
-                {p.agent.cols}×{p.agent.rows}
-              </span>
-            )}
-            {p.agent?.live && <button onClick={() => void onStop(p.agent!.id)}>parar</button>}
-            {p.agent && !p.agent.live && p.agent.sessionId && (
-              <button onClick={() => void onResume(p.agent!.id)}>resumir</button>
-            )}
-            <button onClick={() => void onRemove(p.key, p.agent?.id)}>remover</button>
-          </div>
-          <div className="agent-term">
-            <AgentTerminal resolveAgent={resolveFor(p.key)} />
-          </div>
-        </section>
-      ))}
-
-      {health && (
-        <footer className="foot">
-          telas: {(health.buffer.bytes / 1024).toFixed(0)} KB em {health.buffer.agents} agente(s) ·
-          raízes permitidas: {health.allowedRoots.join(' · ')}
-        </footer>
+      {!panels.length && (
+        <p className="blank">
+          Nada aberto ainda. Abra um agente pela gaveta — ele vira uma janela aqui, e o botão
+          <em> helper</em> no cabeçalho dela abre o próximo, ligado por uma seta.
+        </p>
       )}
     </div>
   )

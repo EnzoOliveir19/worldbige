@@ -29,6 +29,51 @@ import { connectAgent, type Transport } from './transport'
 
 const RESIZE_DEBOUNCE_MS = 150
 
+/**
+ * A paleta do terminal.
+ *
+ * O canvas é de papel claro e a janela é escura: o contraste é o desenho, não
+ * um acidente — uma janela acesa num mundo apagado é o que faz os agentes
+ * lerem como coisas vivas. Por isso a paleta é escura mas não preta, e os ANSI
+ * são dessaturados o bastante pra conviver com o papel em volta.
+ *
+ * O cursor é âmbar, a mesma cor de `precisa de você`: âmbar nesta interface
+ * quer dizer sempre a mesma coisa — é aqui que você entra.
+ */
+const TERM_THEME = {
+  background: '#0e1210',
+  foreground: '#ccd4cc',
+  cursor: '#e07a1f',
+  cursorAccent: '#0e1210',
+  selectionBackground: 'rgba(224, 122, 31, 0.22)',
+  black: '#1b211d',
+  red: '#d4766c',
+  green: '#8fbf87',
+  yellow: '#d8b36a',
+  blue: '#7fa8d8',
+  magenta: '#b998d8',
+  cyan: '#7fc3bd',
+  white: '#c6cec6',
+  brightBlack: '#5c665e',
+  brightRed: '#e8908a',
+  brightGreen: '#a8d6a0',
+  brightYellow: '#e8c98a',
+  brightBlue: '#9cc0e8',
+  brightMagenta: '#cfb2e8',
+  brightCyan: '#9adbd4',
+  brightWhite: '#e4eae4',
+} as const
+
+/** Os terminais montados agora, pro handle de inspeção saber de quem falar. */
+const openTerminals = new Set<Terminal>()
+
+function activeTerminal(): Terminal | null {
+  for (const t of openTerminals) {
+    if (t.textarea && t.textarea === document.activeElement) return t
+  }
+  return openTerminals.values().next().value ?? null
+}
+
 type Props = {
   /**
    * Devolve o id do agente já dimensionado. Chamado uma única vez, depois da
@@ -36,6 +81,8 @@ type Props = {
    * num tamanho qualquer e corrigir com um resize logo em seguida.
    */
   resolveAgent: (cols: number, rows: number) => Promise<string | null>
+  /** a janela está em foco: o teclado tem que estar aqui dentro */
+  focused?: boolean
 }
 
 /** Espera o layout assentar: dois frames depois das fontes. */
@@ -45,8 +92,10 @@ function layoutSettled(): Promise<void> {
   })
 }
 
-export function AgentTerminal({ resolveAgent }: Props) {
+export function AgentTerminal({ resolveAgent, focused = false }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null)
+  // O terminal vivo, pra poder devolver o foco quando a câmera chega na janela.
+  const termRef = useRef<Terminal | null>(null)
   // O último tamanho que o daemon já conhece. Nunca remandamos o mesmo.
   const lastSent = useRef<{ cols: number; rows: number } | null>(null)
   // A prop muda de identidade a cada render do pai; guardada num ref, o efeito
@@ -63,20 +112,24 @@ export function AgentTerminal({ resolveAgent }: Props) {
     let transport: Transport | null = null
     let debounce: number | undefined
 
+    // Sem renderer addon de propósito: o xterm 5 desenha em DOM por padrão, e
+    // texto em DOM o navegador rasteriza depois da transform do canvas — é o
+    // que mantém o terminal nítido em qualquer zoom. Um renderer de canvas
+    // (ou WebGL) desenharia num bitmap, que o zoom borraria.
     const term = new Terminal({
-      fontFamily: 'Cascadia Mono, Consolas, Menlo, monospace',
+      fontFamily: '"JetBrains Mono Variable", "JetBrains Mono", Consolas, monospace',
       fontSize: 13,
-      lineHeight: 1.0,
+      // Mais ar entre as linhas que num terminal de sistema: a janela é pra ser
+      // lida de longe, com o canvas afastado, não só de perto.
+      lineHeight: 1.35,
+      letterSpacing: 0,
       cursorBlink: true,
+      cursorStyle: 'bar',
       allowProposedApi: true,
       scrollback: 10_000,
-      theme: {
-        background: '#12131a',
-        foreground: '#d7dae3',
-        cursor: '#e8795a',
-        selectionBackground: '#2d3350',
-      },
+      theme: TERM_THEME,
     })
+    termRef.current = term
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(host)
@@ -84,17 +137,118 @@ export function AgentTerminal({ resolveAgent }: Props) {
     // Handle de inspeção: dá acesso ao buffer renderizado de fora da página,
     // que é a única forma de verificar o scrollback por automação. Sem isso o
     // teste só enxerga o que está no viewport, e duplicata em scrollback passa.
+    // Com várias janelas abertas, ele responde pela que está com o teclado.
+    openTerminals.add(term)
     const debug = (window as unknown as { __worldbige?: Record<string, unknown> }).__worldbige ?? {}
     debug.screenText = () => {
-      const buf = term.buffer.active
+      const t = activeTerminal()
+      if (!t) return ''
+      const buf = t.buffer.active
       const lines: string[] = []
       for (let i = 0; i < buf.length; i++) {
         lines.push(buf.getLine(i)?.translateToString(true) ?? '')
       }
       return lines.join('\n')
     }
-    debug.size = () => ({ cols: term.cols, rows: term.rows })
+    debug.size = () => {
+      const t = activeTerminal()
+      return t ? { cols: t.cols, rows: t.rows } : null
+    }
+    debug.selection = () => {
+      for (const t of openTerminals) if (t.hasSelection()) return t.getSelection()
+      return null
+    }
     ;(window as unknown as { __worldbige?: Record<string, unknown> }).__worldbige = debug
+
+    // ---------- copiar e colar ----------
+    //
+    // Colar texto NÃO passa pela API de área de transferência: o caminho é o
+    // `paste` nativo do navegador, que dispara sozinho no textarea escondido do
+    // xterm e não pede permissão nenhuma. O xterm já sabe tratá-lo, inclusive
+    // embrulhando em bracketed paste — que é como o Claude Code reconhece um
+    // texto colado em vez de digitado.
+    //
+    // A exceção é imagem. O Claude Code cola imagem lendo a área de
+    // transferência DO SISTEMA, e no Windows a tecla dele pra isso é Alt+V, não
+    // Ctrl+V — medido: com imagem no clipboard, Ctrl+V não anexa nada e Alt+V
+    // vira `[Image #1]`. Então mandamos ESC+v (`\x1bv`), que é como o terminal
+    // codifica Alt+V. Como o navegador e o daemon estão no mesmo micro, quem lê
+    // o clipboard é ele.
+    //
+    // Ou seja: imagem na área de transferência → Ctrl+V vira Alt+V; qualquer
+    // outra coisa → o xterm cola o texto. Alt+V digitado na mão segue igual,
+    // porque não passa por aqui.
+    const ALT_V = '\x1bv'
+
+    const copy = (text: string) => {
+      if (!text) return
+      void navigator.clipboard?.writeText(text).catch(() => undefined)
+    }
+
+    const onPaste = (e: ClipboardEvent) => {
+      const data = e.clipboardData
+      if (!data) return
+      const hasImage = [...data.items].some((i) => i.type.startsWith('image/'))
+      if (!hasImage) return // texto: o xterm cuida
+      e.preventDefault()
+      e.stopPropagation()
+      transport?.send(ALT_V)
+    }
+    term.textarea?.addEventListener('paste', onPaste, true)
+
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true
+      if (!event.ctrlKey || event.altKey || event.metaKey) return true
+      const key = event.key.toLowerCase()
+
+      if (key === 'c') {
+        // Com seleção, Ctrl+C copia; sem seleção é o ^C de sempre, que é como
+        // se interrompe o que o agente está fazendo.
+        if (term.hasSelection()) {
+          copy(term.getSelection())
+          // Limpa como o terminal do Windows faz. Além de dar o retorno visual
+          // de que copiou, evita a surpresa seguinte: com a seleção de pé, o
+          // botão direito copiaria de novo em vez de colar.
+          term.clearSelection()
+          event.preventDefault()
+          return false
+        }
+        // Ctrl+Shift+C sem seleção não tem por que virar ^C.
+        if (event.shiftKey) {
+          event.preventDefault()
+          return false
+        }
+        return true
+      }
+
+      if (key === 'v') {
+        // Devolver `false` sem cancelar o evento é o ponto: o xterm não manda
+        // \x16 e o navegador segue com a colagem nativa. Vale pro Ctrl+Shift+V
+        // também, que o navegador trata como colar texto puro.
+        return false
+      }
+
+      return true
+    })
+
+    // Botão direito, como no terminal do Windows: com seleção copia, sem
+    // seleção cola. Aqui não existe evento nativo de colar pra aproveitar, então
+    // é a API mesmo — e o navegador pode pedir permissão na primeira vez.
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault()
+      if (term.hasSelection()) {
+        copy(term.getSelection())
+        term.clearSelection()
+        return
+      }
+      void navigator.clipboard
+        ?.readText()
+        .then((text) => {
+          if (text) term.paste(text)
+        })
+        .catch(() => undefined)
+    }
+    host.addEventListener('contextmenu', onContextMenu)
 
     const observer = new ResizeObserver(() => {
       if (disposed) return
@@ -175,7 +329,6 @@ export function AgentTerminal({ resolveAgent }: Props) {
       // O teclado só vai pro pty agora: com o transporte ligado, a resposta do
       // xterm à consulta de cursor do programa encontra o caminho de volta.
       term.onData((data) => t.send(data))
-      term.focus()
 
       // 6: a partir daqui, redimensionar a janela é intenção do usuário
       observer.observe(host)
@@ -187,11 +340,21 @@ export function AgentTerminal({ resolveAgent }: Props) {
       observer.disconnect()
       // close() desassina; o pty é do daemon e continua trabalhando.
       transport?.close()
+      term.textarea?.removeEventListener('paste', onPaste, true)
+      host.removeEventListener('contextmenu', onContextMenu)
+      openTerminals.delete(term)
+      termRef.current = null
       term.dispose()
     }
     // monta uma vez: a prop vive no ref acima
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // A câmera chegou nesta janela: o teclado vem junto. Sem isto, enquadrar uma
+  // janela deixaria você olhando pra ela e digitando noutra.
+  useEffect(() => {
+    if (focused) termRef.current?.focus()
+  }, [focused])
 
   return <div className="term-host" ref={hostRef} />
 }

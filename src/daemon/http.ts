@@ -14,7 +14,9 @@ import {
   parseModel,
   removeAgent,
   resumeAgent,
+  setLayout,
   stopAgent,
+  type AgentLayout,
 } from './agents.js'
 import type { HookEvent } from './status.js'
 import { allowedRoots, CwdRefused } from './cwd.js'
@@ -121,6 +123,9 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
         buffer: screenStats(),
         reposRoot: config.reposRoot,
         allowedRoots: allowedRoots(),
+        // A gaveta desenha um ponto por vaga de helper; sem o limite ela não
+        // tem como dizer quantas vagas existem.
+        maxHelpers: config.maxHelpers,
         uptimeMs: Math.round(process.uptime() * 1000),
       })
     }
@@ -138,6 +143,14 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
         cols: typeof body.cols === 'number' ? body.cols : undefined,
         rows: typeof body.rows === 'number' ? body.rows : undefined,
         model: parseModel(body.model),
+        // Quem abriu este agente. Hoje vem do botão de helper no canvas; na
+        // unidade 4 vai vir do `after` do `spawn_helper`, pelo mesmo campo.
+        parentId: typeof body.parentId === 'string' && body.parentId ? body.parentId : null,
+        // O front manda o lugar quando a janela já está na tela medindo o
+        // terminal; sem isso o daemon escolhe (abaixo do pai, à direita do irmão).
+        ...(body.layout && typeof body.layout === 'object'
+          ? { layout: body.layout as Partial<AgentLayout> }
+          : {}),
         // Política de permissão do run type. A unidade 5 é quem monta as
         // listas; aqui é só o cano por onde elas chegam — e é o que permite
         // provocar um prompt de permissão numa conta que roda em auto mode.
@@ -160,6 +173,22 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
           ? json(res, 200, { ok: true })
           : json(res, 404, { error: 'agente não encontrado' })
       }
+    }
+
+    // Onde a janela está no canvas. É PATCH e não PUT porque o front manda só o
+    // que mudou — arrastar manda x/y, redimensionar manda w/h, clicar manda z.
+    const layout = /^\/api\/agents\/([^/]+)\/layout$/.exec(pathname)
+    if (layout && (req.method === 'PATCH' || req.method === 'POST')) {
+      const id = layout[1] as string
+      const raw = await readBody(req)
+      const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+      const patch: Partial<AgentLayout> = {}
+      for (const key of ['x', 'y', 'w', 'h', 'z'] as const) {
+        if (typeof body[key] === 'number') patch[key] = body[key]
+      }
+      if (typeof body.collapsed === 'boolean') patch.collapsed = body.collapsed
+      const agent = setLayout(id, patch)
+      return agent ? json(res, 200, { agent }) : json(res, 404, { error: 'agente não encontrado' })
     }
 
     const resume = /^\/api\/agents\/([^/]+)\/resume$/.exec(pathname)

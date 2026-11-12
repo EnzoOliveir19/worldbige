@@ -98,6 +98,16 @@ export type AgentStatus =
   | 'stopped'
   | 'failed'
 
+/** A janela no canvas, em coordenadas de mundo. O dono do estado é o daemon. */
+export type AgentLayout = {
+  x: number
+  y: number
+  w: number
+  h: number
+  collapsed: boolean
+  z: number
+}
+
 export type Agent = {
   id: string
   name: string
@@ -114,12 +124,18 @@ export type Agent = {
   model: AgentModel
   /** ferramenta esperando aprovação, quando o status é `needs_you` */
   waitingTool: string | null
+  layout: AgentLayout
+  /** quem abriu este agente: é a seta no canvas */
+  parentId: string | null
+  /** índice na paleta de identidade */
+  tint: number
 }
 
 export type Health = {
   ok: boolean
   reposRoot: string
   allowedRoots: string[]
+  maxHelpers: number
   buffer: { agents: number; bytes: number }
 }
 
@@ -190,6 +206,14 @@ export async function createAgent(input: {
   cols?: number
   rows?: number
   model?: string
+  /** quem abriu este agente; vira a seta no canvas */
+  parentId?: string | null
+  /**
+   * Onde a janela já está na tela. O front manda porque a janela existe como
+   * fantasma antes do agente: ela é quem mede as dimensões do terminal, e sem
+   * este campo o daemon escolheria outro lugar e a janela pularia ao nascer.
+   */
+  layout?: Partial<AgentLayout>
 }): Promise<Agent> {
   const res = await fetch('/api/agents', {
     method: 'POST',
@@ -199,6 +223,21 @@ export async function createAgent(input: {
   const body = (await res.json()) as { agent?: Agent; error?: string }
   if (!res.ok || !body.agent) throw new Error(body.error || `POST /api/agents: ${res.status}`)
   return body.agent
+}
+
+/**
+ * Grava onde a janela ficou. Só no fim do gesto — durante o arrasto a verdade é
+ * local, senão cada frame viraria uma escrita em disco.
+ *
+ * `z: -1` quer dizer "traz pra frente": quem decide o topo é o daemon, que é o
+ * único que enxerga todas as janelas.
+ */
+export async function patchLayout(id: string, patch: Partial<AgentLayout>): Promise<void> {
+  await fetch(`/api/agents/${encodeURIComponent(id)}/layout`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
 }
 
 export async function deleteAgent(id: string): Promise<void> {

@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { config, paths } from './config.js'
-import type { AgentStatus } from './agents.js'
+import type { AgentLayout, AgentStatus } from './agents.js'
 
 export type PersistedAgent = {
   id: string
@@ -24,6 +24,16 @@ export type PersistedAgent = {
   sessionId: string | null
   /** modelo pedido no spawn; null = padrão da conta */
   model?: 'opus' | 'sonnet' | 'haiku' | 'fable' | null
+  /**
+   * Onde a janela está no canvas. Mora aqui, e não no front, porque o front é
+   * descartável por desenho: arrastar uma janela e recarregar a aba não pode
+   * desfazer o arrasto.
+   */
+  layout?: AgentLayout
+  /** quem abriu este agente — é a seta no canvas (e o `after` da unidade 4) */
+  parentId?: string | null
+  /** índice da tinta de identidade: o ponto na gaveta, a linha e o fio da janela */
+  tint?: number
 }
 
 export type State = {

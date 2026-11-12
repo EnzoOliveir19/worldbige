@@ -3,7 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
     <title>worldbige</title>
+    <!-- A cor do papel antes do CSS carregar: sem isto a primeira pintura é
+         branca e o canvas pisca ao abrir. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #efe6e3;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
