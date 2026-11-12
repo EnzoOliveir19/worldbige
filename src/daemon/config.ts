@@ -49,6 +49,31 @@ export const config = {
   /** Silêncio além disso marca o agente como `stale`. */
   staleMs: int(process.env.WORLDBIGE_STALE_MS, 10 * 60 * 1000),
 
+  /**
+   * Quanto tempo depois da última tecla do Enzo o daemon ainda se cala.
+   *
+   * Uma entrega no stdin do lead colide com quem está digitando nele. A fila já
+   * cobre o Claude ocupado; isto cobre o humano ocupado.
+   */
+  quietMs: int(process.env.WORLDBIGE_QUIET_MS, 3000),
+
+  /**
+   * Entre o texto injetado e o Enter.
+   *
+   * A TUI processa o texto colado e redesenha o campo de entrada; mandar o
+   * Enter no mesmo instante pode chegar antes de ela ter o que enviar.
+   */
+  enterDelayMs: int(process.env.WORLDBIGE_ENTER_DELAY_MS, 180),
+
+  /**
+   * Folga entre abrir um helper e digitar o brief nele.
+   *
+   * A sessão anuncia SessionStart durante a própria subida, que é antes de a
+   * TUI estar desenhada. O pty enfileira o que chega cedo demais, mas um
+   * segundo de folga evita depender desse detalhe.
+   */
+  briefGraceMs: int(process.env.WORLDBIGE_BRIEF_GRACE_MS, 1500),
+
   /** Onde o front buildado vive. */
   frontDir: path.join(repoRoot, 'dist', 'front'),
 } as const

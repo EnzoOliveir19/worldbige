@@ -106,6 +106,15 @@ export type AgentLayout = {
   h: number
   collapsed: boolean
   z: number
+  /** arrastada pelo Enzo: saiu do arranjo em colchete e fica onde ele deixou */
+  pinned?: boolean
+}
+
+/** O último `report` do agente — o que ELE diz de si, não a máquina de status. */
+export type AgentNote = {
+  status: string
+  summary: string
+  at: number
 }
 
 export type Agent = {
@@ -122,10 +131,18 @@ export type Agent = {
   /** há um pty vivo por trás deste agente? */
   live: boolean
   model: AgentModel
+  /** por que esse modelo, em uma linha; quem escreveu foi quem abriu o agente */
+  modelReason: string | null
+  /** a que run ele pertence */
+  runId: string
+  /** o papel dado pelo lead no `spawn_helper` */
+  role: string | null
+  /** o último `report` dele */
+  note: AgentNote | null
   /** ferramenta esperando aprovação, quando o status é `needs_you` */
   waitingTool: string | null
   layout: AgentLayout
-  /** quem abriu este agente: é a seta no canvas */
+  /** quem abriu este agente: é o colchete no canvas */
   parentId: string | null
   /** índice na paleta de identidade */
   tint: number

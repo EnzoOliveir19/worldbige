@@ -4,7 +4,7 @@
 // linha que liga o agente a quem o abriu, e o fio na borda de cima da janela.
 // Nunca como preenchimento — o canvas é de papel, e um bloco de cor saturada
 // roubaria o lugar do único destaque que importa, que é `precisa de você`.
-import type { AgentStatus } from './transport'
+import type { Agent, AgentStatus } from './transport'
 
 /**
  * Seis tintas minerais, na mesma faixa de saturação pra nenhuma gritar mais que
@@ -54,6 +54,31 @@ export function statusTone(status: AgentStatus): StatusTone {
 /** `precisa de você` e `espera confiança` são as duas formas de "parei por sua causa". */
 export function waitsForYou(status: AgentStatus): boolean {
   return statusTone(status) === 'alarm'
+}
+
+/**
+ * O papel do agente, pra aparecer como selo na janela, no card e na gaveta.
+ *
+ * O nome diz QUEM é; o selo diz O QUE ELE É no run. Sem ele, saber quem
+ * coordena exige seguir as setas até achar quem não tem pai — e num canvas com
+ * dois runs lado a lado isso é trabalho a cada olhada.
+ *
+ * Quando há mais de um lead na tela, o selo ganha o run: dois selos "lead"
+ * iguais não dizem de qual run cada um é. A desambiguação é pelo run e não por
+ * id de agente, porque o run é o que a pessoa está acompanhando.
+ */
+export function roleOf(agent: Agent, all: Agent[]): string {
+  if (!agent.parentId) {
+    const leads = all.filter((a) => !a.parentId)
+    return leads.length > 1 ? `lead · ${shortRun(agent.runId)}` : 'lead'
+  }
+  return agent.role ? `helper · ${agent.role}` : 'helper'
+}
+
+/** `run-20261112-100353-4105` → `run 4105`. O sufixo é o que distingue. */
+export function shortRun(runId: string): string {
+  const tail = runId.split('-').pop()
+  return tail ? `run ${tail}` : 'run'
 }
 
 /** mm:ss até uma hora, h:mm:ss depois dela. */

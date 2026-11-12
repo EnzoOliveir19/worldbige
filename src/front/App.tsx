@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AgentWindow } from './AgentWindow'
 import { Drawer } from './Drawer'
+import { roleOf } from './identity'
 import { Canvas } from './canvas/Canvas'
 import { Arrows } from './canvas/Arrows'
 import { WIN_H, WIN_W, placeNew, rectOf } from './canvas/geometry'
@@ -57,7 +58,13 @@ type Panel = { key: string; agentId: string | null; ghost: Agent }
 /** Uma janela que este navegador abriu e que ainda está virando agente. */
 type Ghost = { key: string; agentId: string | null; agent: Agent }
 
-function ghostAgent(key: string, layout: AgentLayout, cwd: string, model: string): Agent {
+function ghostAgent(
+  key: string,
+  layout: AgentLayout,
+  cwd: string,
+  model: string,
+  parentId: string | null,
+): Agent {
   return {
     id: key,
     name: 'abrindo…',
@@ -71,9 +78,17 @@ function ghostAgent(key: string, layout: AgentLayout, cwd: string, model: string
     sessionId: null,
     live: false,
     model: (model || null) as Agent['model'],
+    modelReason: null,
+    // Um fantasma ainda não pertence a run nenhum: quem decide isso é o daemon,
+    // no instante em que o agente nasce de verdade.
+    runId: '',
+    role: null,
+    note: null,
     waitingTool: null,
     layout,
-    parentId: null,
+    // O fantasma já sabe de quem é filho, e é o que faz o colchete aparecer no
+    // instante do clique em vez de só quando o daemon responde.
+    parentId,
     tint: 0,
   }
 }
@@ -243,7 +258,7 @@ export function App() {
       pending.current.set(key, { cwd: input.cwd, model: input.model, parentId })
       setGhosts((prev) => [
         ...prev,
-        { key, agentId: null, agent: ghostAgent(key, layout, input.cwd, input.model) },
+        { key, agentId: null, agent: ghostAgent(key, layout, input.cwd, input.model, parentId) },
       ])
       setFocusedId(key)
       flyTo((view) => centerRect({ ...spot, w: WIN_W, h: WIN_H }, view, FOCUS_Z))
@@ -338,6 +353,7 @@ export function App() {
             <AgentWindow
               key={panel.key}
               agent={agent}
+              role={roleOf(agent, shown)}
               zoom={camera.z}
               focused={focusedId === agent.id || focusedId === panel.key}
               onFocus={() => goTo(agent.id)}

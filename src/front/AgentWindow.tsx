@@ -22,6 +22,8 @@ const MIN_H = 240
 
 type Props = {
   agent: Agent
+  /** o papel dele no run: `lead`, `helper · busca`… */
+  role: string
   /** zoom corrente: converte pixel de tela em unidade de mundo */
   zoom: number
   focused: boolean
@@ -163,16 +165,34 @@ export function AgentWindow(props: Props) {
       <header className="win-head" onPointerDown={onHeaderDown} onDoubleClick={props.onReframe}>
         <span className="win-mark" aria-hidden="true" />
         <h2 className="win-name">{agent.name}</h2>
+        {/* O nome diz quem é; o selo diz o que ele é no run. Fica calado de
+            propósito — o destaque da janela pertence a `precisa de você`. */}
+        <span className="role">{props.role}</span>
         <span className={`pill tone-${statusTone(agent.status)}`}>
           {statusLabel(agent.status)}
           {agent.waitingTool ? `: ${agent.waitingTool}` : ''}
         </span>
-        <span className="win-meta">
+        {/* O modelo vem com o motivo no title: um helper rodando em opus sem
+            ninguém saber por quê é exatamente o que a tabela de roteamento
+            existe pra evitar, e o motivo tem que estar onde o modelo está. */}
+        <span className="win-meta" title={agent.modelReason ?? undefined}>
           {basename(agent.cwd)}
+          {agent.role ? ` · ${agent.role}` : ''}
           {agent.model ? ` · ${agent.model}` : ''}
+          {agent.modelReason ? ` (${agent.modelReason})` : ''}
           {agent.sessionId ? ` · ${agent.sessionId.slice(0, 8)}` : ''}
         </span>
         <nav className="win-acts">
+          {/* Só aparece quando há o que desfazer: uma janela no arranjo não tem
+              o que realinhar, e um botão morto no cabeçalho é ruído. */}
+          {rect.pinned && (
+            <button
+              onClick={() => props.onLayout({ pinned: false }, true)}
+              title="devolve esta janela à coluna de quem a abriu"
+            >
+              realinhar
+            </button>
+          )}
           <button onClick={props.onHelper} title="abre um agente que depende deste">
             helper
           </button>
@@ -190,10 +210,19 @@ export function AgentWindow(props: Props) {
 
       {collapsed ? (
         <div className="win-card">
-          <p>
-            {agent.cwd}
-            {agent.exitCode !== null ? ` · saiu com ${agent.exitCode}` : ''}
-          </p>
+          {/* Recolhida, a janela é o que o agente disse de si no último
+              `report` — não o caminho dele, que já está no cabeçalho. Sem o
+              report, o card cai no que sempre teve. */}
+          {agent.note ? (
+            <p className="win-note">
+              <strong>{agent.note.status}</strong> {agent.note.summary}
+            </p>
+          ) : (
+            <p>
+              {agent.cwd}
+              {agent.exitCode !== null ? ` · saiu com ${agent.exitCode}` : ''}
+            </p>
+          )}
         </div>
       ) : (
         <>

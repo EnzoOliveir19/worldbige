@@ -18,8 +18,12 @@ export const CARD_H = 108
 /** Tamanho de uma janela nova. Igual ao do daemon, de propósito — ver `placeNew`. */
 export const WIN_W = 840
 export const WIN_H = 620
-const GAP_X = 72
-const GAP_Y = 120
+/** Entre uma coluna e a seguinte. É onde o tronco do colchete é desenhado. */
+export const COL_GAP = 120
+/** Entre dois irmãos empilhados. Fixo: a coluna tem que ler como uma lista. */
+export const ROW_GAP = 48
+/** Entre uma raiz e a raiz seguinte, com a subárvore inteira no meio. */
+const RUN_GAP = 220
 
 export function rectOf(agent: Agent): Rect {
   const { x, y, w, h, collapsed } = agent.layout
@@ -27,30 +31,31 @@ export function rectOf(agent: Agent): Rect {
 }
 
 /**
- * Onde uma janela nova entra: helper abaixo de quem o abriu, irmão à direita do
- * irmão anterior, raiz à direita da última raiz.
+ * Onde uma janela nova entra: no fim da coluna de quem a abriu — os helpers de
+ * um agente ficam numa coluna à direita dele, empilhados e alinhados pelo topo.
+ * Uma raiz nova entra à direita de tudo que já existe, subárvores incluídas.
  *
  * A mesma regra vive no daemon, e a duplicação é deliberada. O daemon precisa
- * dela pros spawns que não têm navegador (o `spawn_helper` do MCP, na unidade
- * 4); o front precisa dela antes, porque a janela existe como fantasma enquanto
- * mede o terminal, e é essa medida que faz o agente nascer no tamanho certo.
- * Se o front não escolhesse o lugar, a janela nasceria num ponto e pularia pro
- * outro assim que o daemon respondesse.
+ * dela pros spawns que não têm navegador (o `spawn_helper` do MCP) e pra
+ * refazer a pilha quando alguém entra ou sai; o front precisa dela antes,
+ * porque a janela existe como fantasma enquanto mede o terminal, e é essa
+ * medida que faz o agente nascer no tamanho certo. Se o front não escolhesse o
+ * lugar, a janela nasceria num ponto e pularia pro outro assim que o daemon
+ * respondesse.
  */
 export function placeNew(agents: Agent[], parentId: string | null): { x: number; y: number } {
   const parent = parentId ? agents.find((a) => a.id === parentId) : undefined
 
   if (parent) {
-    const pr = rectOf(parent)
-    const siblings = agents.filter((a) => a.parentId === parent.id)
-    const y = pr.y + pr.h + GAP_Y
-    if (!siblings.length) return { x: pr.x, y }
-    const rightmost = siblings.reduce((m, a) => Math.max(m, a.layout.x + a.layout.w), -Infinity)
-    return { x: rightmost + GAP_X, y }
+    const x = Math.round(parent.layout.x + parent.layout.w + COL_GAP)
+    // Quem foi arrastado pra fora da coluna não ocupa mais lugar nela.
+    const siblings = agents.filter((a) => a.parentId === parent.id && !a.layout.pinned)
+    const y = siblings.reduce((acc, a) => acc + rectOf(a).h + ROW_GAP, parent.layout.y)
+    return { x, y: Math.round(y) }
   }
 
-  const roots = agents.filter((a) => !a.parentId)
-  if (!roots.length) return { x: 0, y: 0 }
-  const rightmost = roots.reduce((m, a) => Math.max(m, a.layout.x + a.layout.w), -Infinity)
-  return { x: rightmost + GAP_X, y: roots[0]?.layout.y ?? 0 }
+  if (!agents.length) return { x: 0, y: 0 }
+  const right = agents.reduce((m, a) => Math.max(m, a.layout.x + a.layout.w), -Infinity)
+  const top = agents.reduce((m, a) => Math.min(m, a.layout.y), Infinity)
+  return { x: Math.round(right + RUN_GAP), y: Math.round(top) }
 }

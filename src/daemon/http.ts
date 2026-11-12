@@ -20,6 +20,7 @@ import {
 } from './agents.js'
 import type { HookEvent } from './status.js'
 import { allowedRoots, CwdRefused } from './cwd.js'
+import { handleMcpRequest } from './mcp.js'
 
 export function json(res: ServerResponse, code: number, body: unknown): void {
   const payload = JSON.stringify(body)
@@ -114,6 +115,18 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
       })
       return
     }
+    // ---- MCP ----
+    // Mesma porta do resto, porque o daemon é um processo só. Quem fala aqui
+    // são os agentes, não o front: a identidade vem do header que o
+    // `--mcp-config` de cada sessão carrega.
+    if (pathname === '/mcp') {
+      // O corpo é lido aqui e entregue já parseado ao transporte — ler duas
+      // vezes o mesmo stream devolveria vazio na segunda.
+      const raw = req.method === 'POST' ? await readBody(req) : ''
+      await handleMcpRequest(req, res, raw)
+      return
+    }
+
     if (pathname === '/api/health') {
       return json(res, 200, {
         ok: true,
@@ -187,6 +200,10 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
         if (typeof body[key] === 'number') patch[key] = body[key]
       }
       if (typeof body.collapsed === 'boolean') patch.collapsed = body.collapsed
+      // `pinned: false` é o botão de realinhar — o único jeito de uma janela
+      // arrastada voltar pro arranjo automático. Sem passar por aqui, o botão
+      // existiria na tela e não faria nada.
+      if (typeof body.pinned === 'boolean') patch.pinned = body.pinned
       const agent = setLayout(id, patch)
       return agent ? json(res, 200, { agent }) : json(res, 404, { error: 'agente não encontrado' })
     }

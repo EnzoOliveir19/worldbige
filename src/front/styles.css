@@ -305,6 +305,45 @@ body.dragging .win-head {
   word-break: break-all;
 }
 
+/* O último `report` do agente. Não quebra no meio da palavra como o caminho
+   acima: isto é frase, e frase quebrada em sílaba não se lê de relance. */
+.win-note {
+  word-break: normal;
+  color: var(--ink);
+}
+
+.win-note strong {
+  margin-right: 6px;
+  color: var(--ink-soft);
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+/* ---------- selo de papel ---------- */
+
+/* Quem coordena e quem executa, dito em texto em vez de deduzido das setas.
+   De tom baixo de propósito: é informação de estrutura, que se consulta, e não
+   de estado, que chama. O único destaque da tela é `precisa de você`. */
+.role {
+  flex: none;
+  color: var(--ink-soft);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.win-head .role {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(60, 45, 45, 0.06);
+}
+
+.list .role {
+  grid-column: 4;
+  justify-self: end;
+  padding-left: 6px;
+}
+
 /* ---------- pílulas de status ---------- */
 
 .pill {
@@ -484,7 +523,9 @@ body.dragging .win-head {
    ser abreviado — comia o nome do agente até o reticente. */
 .list li button {
   display: grid;
-  grid-template-columns: 17px 10px 1fr;
+  /* A quarta coluna é o selo de papel, à direita do nome: na linha de baixo ele
+     brigaria com a pílula de status pelo mesmo lugar. */
+  grid-template-columns: 17px 10px 1fr auto;
   align-items: center;
   gap: 2px 8px;
   width: 100%;

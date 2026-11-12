@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { config, paths } from './config.js'
-import type { AgentLayout, AgentStatus } from './agents.js'
+import type { AgentLayout, AgentNote, AgentStatus } from './agents.js'
 
 export type PersistedAgent = {
   id: string
@@ -24,6 +24,17 @@ export type PersistedAgent = {
   sessionId: string | null
   /** modelo pedido no spawn; null = padrão da conta */
   model?: 'opus' | 'sonnet' | 'haiku' | 'fable' | null
+  /** por que esse modelo, em uma linha — quem escreve é quem abriu o agente */
+  modelReason?: string | null
+  /**
+   * A que run este agente pertence. É a pasta onde o resultado do `done` e o
+   * log de eventos dele são escritos.
+   */
+  runId?: string
+  /** o papel que o lead deu ao helper no `spawn_helper` */
+  role?: string | null
+  /** o último `report` do próprio agente; é o que o card recolhido mostra */
+  note?: AgentNote | null
   /**
    * Onde a janela está no canvas. Mora aqui, e não no front, porque o front é
    * descartável por desenho: arrastar uma janela e recarregar a aba não pode

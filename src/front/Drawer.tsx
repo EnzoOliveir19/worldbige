@@ -6,7 +6,7 @@
 // mesma informação, reduzida ao que cabe em 48 pixels: quem existe, de que cor,
 // e quem está chamando.
 import { useEffect, useRef, useState } from 'react'
-import { elapsed, statusLabel, statusTone, tintOf, waitsForYou } from './identity'
+import { elapsed, roleOf, statusLabel, statusTone, tintOf, waitsForYou } from './identity'
 import { MODEL_OPTIONS, type Agent, type Health } from './transport'
 
 type Props = {
@@ -134,6 +134,9 @@ export function Drawer(props: Props) {
                 <span className="idx">{String(i + 1).padStart(2, '0')}</span>
                 <span className="dot" style={{ ['--tint' as string]: tintOf(a.tint) }} />
                 <span className="nm">{a.name}</span>
+                {/* O mesmo selo da janela: quem coordena se lê na lista também,
+                    sem precisar ir até o canvas conferir de quem sai a seta. */}
+                <span className="role">{roleOf(a, agents)}</span>
                 <span className={`pill tone-${statusTone(a.status)}`}>{statusLabel(a.status)}</span>
               </button>
             </li>

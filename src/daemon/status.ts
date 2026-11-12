@@ -21,6 +21,12 @@ export type HookEvent = {
   source?: string
   model?: string
   permission_mode?: string
+  /** o que a ferramenta recebeu; só o log de eventos usa */
+  tool_input?: unknown
+  /** o que a ferramenta devolveu; só o log de eventos usa */
+  tool_response?: unknown
+  /** o que o Enzo escreveu, no UserPromptSubmit; só o log de eventos usa */
+  prompt?: string
 }
 
 /**
@@ -63,6 +69,14 @@ export type HookOutcome = {
   changed: boolean
   /** o pty deve ser encerrado? (SessionEnd) */
   ended: boolean
+  /**
+   * Este evento é um ponto de entrega da fila de notificação?
+   *
+   * São dois, e os dois do TDD: `Stop`, que é o fim de um turno, e a
+   * Notification de `idle_prompt`, que é o caso em que o agente já estava
+   * parado antes de a mensagem existir e nenhum Stop novo viria.
+   */
+  deliver: boolean
 }
 
 export function applyHookEvent(agent: Agent, event: HookEvent): HookOutcome {
@@ -80,6 +94,31 @@ export function applyHookEvent(agent: Agent, event: HookEvent): HookOutcome {
   }
 
   let ended = false
+
+  /**
+   * `done` é terminal.
+   *
+   * O agente chama o tool `done` DENTRO de um turno, e o `Stop` desse mesmo
+   * turno chega logo atrás — sem esta trava, o card piscava "concluiu" e
+   * voltava pra "livre" um segundo depois, que foi exatamente o que apareceu
+   * no teste. Conclusão é registro, não estado de processo: nenhum evento
+   * posterior a rebaixa.
+   *
+   * A exceção é um prompt novo. Se alguém escreve de novo na sessão, o agente
+   * voltou a trabalhar de verdade, e insistir em `done` seria o card mentindo
+   * sobre o que está acontecendo na tela. (O resume não passa por aqui: ele
+   * abre uma ficha nova, `starting`.)
+   */
+  const frozen = agent.status === 'done' && event.hook_event_name !== 'UserPromptSubmit'
+
+  if (frozen && event.hook_event_name !== 'SessionEnd') {
+    return {
+      changed: agent.sessionId !== beforeSession,
+      ended: false,
+      // Um agente concluído não recebe mensagem: não há mais trabalho pra pedir.
+      deliver: false,
+    }
+  }
 
   switch (event.hook_event_name) {
     case 'SessionStart':
@@ -125,7 +164,7 @@ export function applyHookEvent(agent: Agent, event: HookEvent): HookOutcome {
     }
 
     case 'Stop':
-      // Ponto de entrega da fila de notificação (unidade 4).
+      // Fim de turno: o ponto de entrega mais comum da fila.
       if (agent.status !== 'needs_you') {
         agent.status = 'idle'
         agent.waitingTool = null
@@ -133,7 +172,9 @@ export function applyHookEvent(agent: Agent, event: HookEvent): HookOutcome {
       break
 
     case 'SessionEnd':
-      agent.status = statusForSessionEnd(event.reason)
+      // A sessão de um agente concluído acaba logo depois do `done`; o pty vai
+      // junto, mas o card continua dizendo que ele concluiu.
+      if (!frozen) agent.status = statusForSessionEnd(event.reason)
       agent.waitingTool = null
       agent.live = false
       ended = true
@@ -149,6 +190,14 @@ export function applyHookEvent(agent: Agent, event: HookEvent): HookOutcome {
       agent.waitingTool !== beforeTool ||
       agent.sessionId !== beforeSession,
     ended,
+    // Entregar quando a sessão ficou parada, qualquer que tenha sido o evento
+    // que a parou. Os dois pontos que o TDD nomeia — `Stop` e `idle_prompt` —
+    // caem aqui por consequência, e um terceiro que ele não previu também:
+    // `SessionStart`. Ele importa porque é por onde o brief de um helper
+    // recém-aberto sai. Um helper que acabou de nascer nunca teve um turno, e
+    // portanto nenhum Stop viria pra drenar a fila dele: o brief esperaria pelo
+    // `idle_prompt`, que só chega depois de minutos de silêncio.
+    deliver: agent.status === 'idle',
   }
 }
 
