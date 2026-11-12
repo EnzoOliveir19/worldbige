@@ -1,0 +1,39 @@
+{
+  "name": "worldbige",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Orquestrador local de agentes Claude Code: um daemon dono dos ptys e um canvas infinito no navegador.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "build:daemon": "tsc -p tsconfig.daemon.json",
+    "build:front": "vite build",
+    "build": "npm run build:daemon && npm run build:front",
+    "start": "npm run build && node dist/daemon/index.js",
+    "serve": "node dist/daemon/index.js",
+    "dev": "vite",
+    "typecheck": "tsc -p tsconfig.daemon.json --noEmit && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@lydell/node-pty": "1.2.0-beta.18",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
+    "@xterm/xterm": "^5.5.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}
