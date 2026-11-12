@@ -19,6 +19,8 @@ Um processo Node em `localhost:4317`, dono dos ptys dos agentes, servindo na mes
 - Estado em arquivo JSON; scrollback em buffer circular (default 2 MB/agente); limite de helpers default 3; tudo configurável.
 - Código copiado do ccanvas mantém cabeçalho de atribuição; repo sob Apache-2.0; diretório privado (material Oncar + dados de runtime) fora do git desde o primeiro commit.
 - Windows nativo: detecção `claude.cmd`/`claude.exe` com override `CLAUDE_BIN`.
+- Modelo por agente, escolhido no spawn e passado como `--model`. Opções: opus, sonnet, haiku, fable e "padrão da conta" — esta última não passa a flag, deixando a configuração do Enzo decidir. Cada run type define o default por papel (lead e helper), configurável; o lead pode sobrepor por helper no `spawn_helper`. O modelo em uso aparece no cabeçalho da janela, porque um agente rodando no modelo errado é invisível de outro jeito.
+- Raiz dos repositórios em `REPOS_ROOT` (configurável). Agente nenhum abre na home: o lead abre na raiz, o helper num repo dentro dela, e o spawn recusa cwd fora de `REPOS_ROOT` ou da pasta do worldbige.
 - Protocolo de execução: os "Done when" são verificação manual no Windows do Enzo. O executor para no fim de cada unidade, entrega o roteiro de teste e só segue depois da confirmação dele. Um commit por unidade concluída e verificada, nunca antes da verificação.
 - Na unidade 5, se um dos gaps de doc falhar na prática, o executor para e reporta em vez de improvisar política; a compensação (deny mais largo ou ask enumerado) é decidida com o Enzo e o TDD ganha emenda.
 
@@ -52,10 +54,12 @@ Depends on: unit 1
 
 Modifies:
 - geração do `--settings` temporário, endpoint de hooks, máquina de status com watchdog, persistência de `session_id`
+- escolha de modelo no spawn: campo no "novo agente" (opus / sonnet / haiku / fable / padrão da conta) passado como `--model`, e o modelo em uso no cabeçalho da janela
+- pasta não confiada: a tela de "trust this folder" aparece antes de qualquer hook, então um agente ali trava em `starting` sem acender `precisa de você` (achado do checkpoint 1 da unidade 1)
 
 Key constraint: a tabela do TDD é literal — nenhum status inventado, `stale` só por silêncio além do limite, resposta de hook sempre neutra.
 
-Done when: no Windows, com um agente aberto: mandar prompt → `running`; deixar terminar → `idle`; provocar um pedido de permissão → `precisa de você`; rodar um comando de minutos → continua `running`; matar o daemon, subir de novo → card `stopped`, e o botão de resume reabre a sessão com o histórico de conversa preservado.
+Done when: no Windows, com um agente aberto: mandar prompt → `running`; deixar terminar → `idle`; provocar um pedido de permissão → `precisa de você`; rodar um comando de minutos → continua `running`; matar o daemon, subir de novo → card `stopped`, e o botão de resume reabre a sessão com o histórico de conversa preservado. Abrir um agente escolhendo haiku e ver o modelo certo no cabeçalho e na sessão. Abrir um agente numa pasta nunca confiada e ver o card dizer que espera confiança, em vez de ficar `starting` calado.
 
 **3. Copiar e podar o canvas** *(task 4 do TDD)*
 
@@ -78,10 +82,11 @@ Depends on: unit 2
 
 Modifies:
 - servidor MCP (`spawn_helper` com limite e fila, `report`, `done`, `list_helpers`, `close_helper`, `get_run`), geração do `--mcp-config` temporário, resultado salvo em markdown, fila de notificação com injeção no stdin
+- `spawn_helper` ganha um `model` opcional, pro lead escolher o modelo de cada helper; sem ele, vale o default do papel definido pelo run type
 
 Key constraint: a entrega nunca digita por cima de prompt aberto nem durante digitação do Enzo — imediata só com lead `idle`, drenagem em Stop/`idle_prompt`, supressão em `permission_prompt`.
 
-Done when: um lead abre um helper por tool call e a seta aparece; o `done` do helper vira markdown no diretório do run; a mensagem `[worldbige]` chega ao lead nos três cenários do TDD (já idle → na hora; running → no próximo Stop; esperando permissão → só depois de resolvida).
+Done when: um lead abre um helper por tool call e a seta aparece; o `done` do helper vira markdown no diretório do run; a mensagem `[worldbige]` chega ao lead nos três cenários do TDD (já idle → na hora; running → no próximo Stop; esperando permissão → só depois de resolvida). Um `spawn_helper` com `model` abre o helper naquele modelo, e um sem `model` cai no default do papel.
 
 **5. Aplicar políticas de permissão e fechar os run types** *(tasks 7+8 do TDD)*
 
@@ -91,10 +96,11 @@ Depends on: unit 3, unit 4
 
 Modifies:
 - políticas allow/ask/deny por run type com `defaultMode` forçado, briefs de lead (freeform e review de PRs), briefs de exemplo públicos, doc de convenções Oncar no diretório privado
+- modelo default por papel (lead e helper) em cada run type, configurável, sobreposto pela escolha explícita no spawn ou pelo `model` do `spawn_helper`
 
 Key constraint: os dois gaps de doc do TDD se verificam aqui, antes de confiar neles — PermissionRequest `http` com resposta neutra preservando o fluxo, e glob parcial em `ask` (ex.: `mcp__claude_ai_Linear__save_*`); se algum falhar, parar e reportar (ver protocolo de execução nas Decisões).
 
-Done when: num reviewer, `Edit`/`Write` são negados, `gh pr diff` roda sem prompt, um tool de escrita do Linear pergunta e acende o card; um review de PR roda de ponta a ponta terminando num markdown de review no estilo Oncar; um run freeform sobe sem política.
+Done when: num reviewer, `Edit`/`Write` são negados, `gh pr diff` roda sem prompt, um tool de escrita do Linear pergunta e acende o card; um review de PR roda de ponta a ponta terminando num markdown de review no estilo Oncar; um run freeform sobe sem política. Um run type com default de helper em haiku abre os helpers em haiku sem ninguém escolher nada.
 
 ## Confirmar antes de executar
 
