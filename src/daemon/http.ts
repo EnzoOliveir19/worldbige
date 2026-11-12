@@ -5,7 +5,18 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { config } from './config.js'
-import { screenStats, createAgent, getAgent, listAgents, removeAgent, stopAgent } from './agents.js'
+import {
+  screenStats,
+  createAgent,
+  getAgent,
+  handleHookEvent,
+  listAgents,
+  parseModel,
+  removeAgent,
+  resumeAgent,
+  stopAgent,
+} from './agents.js'
+import type { HookEvent } from './status.js'
 import { allowedRoots, CwdRefused } from './cwd.js'
 
 export function json(res: ServerResponse, code: number, body: unknown): void {
@@ -74,6 +85,33 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
   const { pathname } = url
 
   try {
+    // ---- hooks ----
+    // Responde ANTES de processar. O SessionEnd tem orçamento de ~1,5 s e
+    // nenhum hook pode esperar o daemon trabalhar; a resposta é sempre neutra,
+    // sem corpo de decisão, pro prompt de permissão seguir o fluxo normal.
+    const hook = /^\/hooks\/([^/]+)$/.exec(pathname)
+    if (hook && req.method === 'POST') {
+      const agentId = hook[1] as string
+      // O corpo já está a caminho: lê, responde, e só então trabalha. Ler não
+      // é processar; o que não pode é a sessão esperar a máquina de status.
+      let raw = ''
+      try {
+        raw = await readBody(req)
+      } catch {
+        /* corpo truncado — responde mesmo assim */
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end('{}')
+
+      setImmediate(() => {
+        try {
+          handleHookEvent(agentId, raw ? (JSON.parse(raw) as HookEvent) : {})
+        } catch (err) {
+          console.error('hook ilegível:', err instanceof Error ? err.message : err)
+        }
+      })
+      return
+    }
     if (pathname === '/api/health') {
       return json(res, 200, {
         ok: true,
@@ -99,6 +137,13 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
         cwd: typeof body.cwd === 'string' && body.cwd ? body.cwd : undefined,
         cols: typeof body.cols === 'number' ? body.cols : undefined,
         rows: typeof body.rows === 'number' ? body.rows : undefined,
+        model: parseModel(body.model),
+        // Política de permissão do run type. A unidade 5 é quem monta as
+        // listas; aqui é só o cano por onde elas chegam — e é o que permite
+        // provocar um prompt de permissão numa conta que roda em auto mode.
+        ...(body.permissions && typeof body.permissions === 'object'
+          ? { permissions: body.permissions as Record<string, unknown> }
+          : {}),
       })
       return json(res, 201, { agent })
     }
@@ -115,6 +160,20 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
           ? json(res, 200, { ok: true })
           : json(res, 404, { error: 'agente não encontrado' })
       }
+    }
+
+    const resume = /^\/api\/agents\/([^/]+)\/resume$/.exec(pathname)
+    if (resume && req.method === 'POST') {
+      const id = resume[1] as string
+      const agent = getAgent(id)
+      if (!agent) return json(res, 404, { error: 'agente não encontrado' })
+      if (!agent.sessionId) {
+        return json(res, 409, {
+          error: 'esse agente nunca registrou um session_id, então não há sessão pra resumir.',
+        })
+      }
+      const back = resumeAgent(id)
+      return back ? json(res, 200, { agent: back }) : json(res, 409, { error: 'não deu pra resumir' })
     }
 
     // Encerra o pty mas guarda a ficha — o agente fica `stopped`, resumível.

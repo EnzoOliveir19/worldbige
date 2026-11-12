@@ -23,6 +23,10 @@ import { config } from './config.js'
 import { findClaude } from './claude-bin.js'
 import { resolveAgentCwd } from './cwd.js'
 import { loadState, saveState, type PersistedAgent, type State } from './state.js'
+import { isTrusted } from './trust.js'
+import { emitAgentsChanged } from './events.js'
+import { removeAgentSettings, writeAgentSettings } from './hook-settings.js'
+import { applyHookEvent, markIfStale, noteUserInput, type HookEvent } from './status.js'
 
 // Os dois pacotes são CommonJS e o daemon é ESM: o Node não enxerga os named
 // exports deles, então o require explícito é o que funciona. Os tipos vêm por
@@ -37,6 +41,8 @@ const { SerializeAddon } = require('@xterm/addon-serialize') as {
 
 export type AgentStatus =
   | 'starting'
+  /** a pasta nunca foi confiada: a sessão está parada na tela de trust */
+  | 'awaiting_trust'
   | 'running'
   | 'idle'
   | 'needs_you'
@@ -44,6 +50,15 @@ export type AgentStatus =
   | 'done'
   | 'stopped'
   | 'failed'
+
+/** Os modelos que o front oferece. `null` = padrão da conta (não passa `--model`). */
+export type AgentModel = 'opus' | 'sonnet' | 'haiku' | 'fable' | null
+
+const MODELS = new Set(['opus', 'sonnet', 'haiku', 'fable'])
+
+export function parseModel(value: unknown): AgentModel {
+  return typeof value === 'string' && MODELS.has(value) ? (value as AgentModel) : null
+}
 
 export type Agent = {
   id: string
@@ -57,6 +72,10 @@ export type Agent = {
   rows: number
   sessionId: string | null
   live: boolean
+  /** modelo pedido no spawn; null = padrão da conta */
+  model: AgentModel
+  /** ferramenta esperando aprovação, quando o status é `needs_you` */
+  waitingTool: string | null
 }
 
 type Subscriber = (chunk: string) => void
@@ -137,9 +156,12 @@ function persist(): void {
       cols: agent.cols,
       rows: agent.rows,
       sessionId: agent.sessionId,
+      model: agent.model,
     })),
   }
   saveState(snapshot)
+  // O front é avisado na hora; sem isso o status só aparece no próximo poll.
+  emitAgentsChanged()
 }
 
 export function restoreAgents(): number {
@@ -174,6 +196,8 @@ function toAgent(p: PersistedAgent): Agent {
     rows: p.rows,
     sessionId: p.sessionId ?? null,
     live: false,
+    model: p.model ?? null,
+    waitingTool: null,
   }
 }
 
@@ -184,7 +208,10 @@ export type SpawnOptions = {
   cwd?: string
   cols?: number
   rows?: number
+  model?: AgentModel
   args?: string[]
+  /** política de permissão do run type (unidade 5) */
+  permissions?: Record<string, unknown>
 }
 
 export function createAgent(opts: SpawnOptions = {}): Agent {
@@ -194,12 +221,17 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
   const id = randomUUID()
   const cols = opts.cols && opts.cols > 1 ? Math.floor(opts.cols) : 100
   const rows = opts.rows && opts.rows > 1 ? Math.floor(opts.rows) : 30
+  const model = opts.model ?? null
+
+  // A tela de confiança aparece antes de qualquer hook: se a pasta nunca foi
+  // aceita, o card já nasce dizendo isso em vez de mentir `starting`.
+  const trusted = isTrusted(cwd)
 
   const agent: Agent = {
     id,
     name: opts.name?.trim() || `agente-${id.slice(0, 4)}`,
     cwd,
-    status: 'starting',
+    status: trusted === false ? 'awaiting_trust' : 'starting',
     createdAt: Date.now(),
     lastSignalAt: Date.now(),
     exitCode: null,
@@ -207,12 +239,24 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
     rows,
     sessionId: null,
     live: true,
+    model,
+    waitingTool: null,
   }
 
   const { term, serializer } = makeScreen(cols, rows)
   const live: Live = { agent, pty: null, subscribers: new Set(), term, serializer, stopping: false }
 
-  const pty = spawnPty(launch.file, [...launch.prefix, ...(opts.args ?? [])], {
+  // Os hooks sobem com a sessão: sem o --settings o agente é um terminal cego.
+  const settingsFile = writeAgentSettings(id, opts.permissions ? { permissions: opts.permissions } : {})
+  const args = [
+    ...launch.prefix,
+    '--settings',
+    settingsFile,
+    ...(model ? ['--model', model] : []),
+    ...(opts.args ?? []),
+  ]
+
+  const pty = spawnPty(launch.file, args, {
     name: 'xterm-256color',
     cols,
     rows,
@@ -240,8 +284,85 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
   })
 
   persist()
-  console.log(`+ agente ${agent.name} (${id.slice(0, 8)}) ${cols}x${rows} cwd=${cwd}`)
+  console.log(
+    `+ agente ${agent.name} (${id.slice(0, 8)}) ${cols}x${rows} modelo=${model ?? 'conta'} cwd=${cwd}` +
+      (trusted === false ? '  [pasta não confiada — a sessão vai parar na tela de trust]' : ''),
+  )
   return agent
+}
+
+/**
+ * Reabre uma sessão parada onde ela estava, com `claude --resume <session_id>`.
+ *
+ * Os ptys morrem com o daemon; o transcript não, porque o Claude Code o
+ * persiste por conta própria. O `session_id` guardado é o que liga uma coisa na
+ * outra. Sem ele não há o que resumir.
+ */
+export function resumeAgent(id: string): Agent | null {
+  const live = agents.get(id)
+  if (!live) return null
+  const old = live.agent
+  if (old.live) return old // já está de pé
+  if (!old.sessionId) return null
+
+  const resumed = createAgent({
+    name: old.name,
+    cwd: old.cwd,
+    cols: old.cols,
+    rows: old.rows,
+    model: old.model,
+    args: ['--resume', old.sessionId],
+  })
+  // A ficha nova herda a identidade da antiga: pro front é o mesmo agente
+  // voltando, não um segundo card.
+  resumed.sessionId = old.sessionId
+  removeAgent(id)
+  persist()
+  console.log(`↻ agente ${resumed.name} resumido de ${old.sessionId.slice(0, 8)}`)
+  return resumed
+}
+
+/** Entrega um evento de hook à máquina de status. */
+export function handleHookEvent(id: string, event: HookEvent): boolean {
+  const live = agents.get(id)
+  if (!live) return false
+  const before = live.agent.status
+  const { changed, ended } = applyHookEvent(live.agent, event)
+  console.log(
+    `  hook ${new Date().toISOString().slice(11, 23)} ${live.agent.name} ${event.hook_event_name ?? '?'}` +
+      (event.source ? ` source=${event.source}` : '') +
+      (event.notification_type ? ` type=${event.notification_type}` : '') +
+      (event.reason ? ` reason=${event.reason}` : '') +
+      (event.tool_name ? ` tool=${event.tool_name}` : '') +
+      (before !== live.agent.status ? `  ${before} → ${live.agent.status}` : ''),
+  )
+  if (ended) {
+    // A sessão se despediu; o pty vai junto, mas a ficha fica.
+    live.stopping = true
+    if (live.pty) {
+      try {
+        live.pty.kill()
+      } catch {
+        /* já morreu */
+      }
+    }
+    live.pty = null
+  }
+  if (changed || ended) persist()
+  return true
+}
+
+/** O watchdog do `stale`: silêncio além do limite é sinal perdido. */
+export function sweepStale(limitMs = config.staleMs): number {
+  let marked = 0
+  for (const live of agents.values()) {
+    if (markIfStale(live.agent, limitMs)) {
+      marked++
+      console.log(`  ${live.agent.name} → stale (sem sinal há ${Math.round(limitMs / 1000)}s)`)
+    }
+  }
+  if (marked) persist()
+  return marked
 }
 
 export function listAgents(): Agent[] {
@@ -295,6 +416,9 @@ export function attachClient(id: string, send: Subscriber): (() => void) | null 
 export function writeToAgent(id: string, data: string): boolean {
   const live = agents.get(id)
   if (!live?.pty) return false
+  // Responder um prompt de permissão é a única saída de `needs_you` que
+  // existe: a rejeição não gera hook nenhum.
+  if (noteUserInput(live.agent, data)) persist()
   live.pty.write(data)
   return true
 }
@@ -366,6 +490,7 @@ export function removeAgent(id: string): boolean {
   }
   live.subscribers.clear()
   live.term.dispose()
+  removeAgentSettings(id)
   agents.delete(id)
   persist()
   console.log(`- agente ${live.agent.name} (${id.slice(0, 8)}) removido`)

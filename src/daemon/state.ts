@@ -20,8 +20,10 @@ export type PersistedAgent = {
   exitCode: number | null
   cols: number
   rows: number
-  /** capturado no SessionStart (unidade 2); é o que permite o `--resume` */
+  /** capturado do primeiro hook que chegar; é o que permite o `--resume` */
   sessionId: string | null
+  /** modelo pedido no spawn; null = padrão da conta */
+  model?: 'opus' | 'sonnet' | 'haiku' | 'fable' | null
 }
 
 export type State = {

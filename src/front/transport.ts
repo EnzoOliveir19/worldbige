@@ -77,8 +77,19 @@ export function connectAgent(
   })
 }
 
+export type AgentModel = 'opus' | 'sonnet' | 'haiku' | 'fable' | null
+
+export const MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'padrão da conta' },
+  { value: 'opus', label: 'opus' },
+  { value: 'sonnet', label: 'sonnet' },
+  { value: 'haiku', label: 'haiku' },
+  { value: 'fable', label: 'fable' },
+]
+
 export type AgentStatus =
   | 'starting'
+  | 'awaiting_trust'
   | 'running'
   | 'idle'
   | 'needs_you'
@@ -100,6 +111,9 @@ export type Agent = {
   sessionId: string | null
   /** há um pty vivo por trás deste agente? */
   live: boolean
+  model: AgentModel
+  /** ferramenta esperando aprovação, quando o status é `needs_you` */
+  waitingTool: string | null
 }
 
 export type Health = {
@@ -115,13 +129,68 @@ export async function fetchHealth(): Promise<Health> {
   return (await res.json()) as Health
 }
 
+/**
+ * Assina o canal de mudanças. É o que faz o status aparecer na hora em vez de
+ * no próximo poll — e `precisa de você` só serve se acender imediatamente.
+ * Devolve a função de desassinar.
+ */
+export function subscribeAgents(onAgents: (agents: Agent[]) => void): () => void {
+  let ws: WebSocket | null = null
+  let retry: number | undefined
+  let closed = false
+
+  const connect = () => {
+    if (closed) return
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    try {
+      ws = new WebSocket(`${proto}://${location.host}/ws/events`)
+    } catch {
+      retry = window.setTimeout(connect, 2000)
+      return
+    }
+    ws.onmessage = (ev) => {
+      if (typeof ev.data !== 'string') return
+      try {
+        const msg = JSON.parse(ev.data) as { type?: string; agents?: Agent[] }
+        if (msg.type === 'agents' && msg.agents) onAgents(msg.agents)
+      } catch {
+        /* mensagem estranha — ignora */
+      }
+    }
+    // Se o daemon cair e voltar, o canal se refaz sozinho.
+    ws.onclose = () => {
+      if (!closed) retry = window.setTimeout(connect, 2000)
+    }
+  }
+  connect()
+
+  return () => {
+    closed = true
+    window.clearTimeout(retry)
+    try {
+      if (ws) {
+        ws.onclose = null
+        ws.close()
+      }
+    } catch {
+      /* já fechado */
+    }
+  }
+}
+
 export async function fetchAgents(): Promise<Agent[]> {
   const res = await fetch('/api/agents')
   if (!res.ok) throw new Error(`GET /api/agents: ${res.status}`)
   return ((await res.json()) as { agents: Agent[] }).agents
 }
 
-export async function createAgent(input: { name?: string; cwd?: string }): Promise<Agent> {
+export async function createAgent(input: {
+  name?: string
+  cwd?: string
+  cols?: number
+  rows?: number
+  model?: string
+}): Promise<Agent> {
   const res = await fetch('/api/agents', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -139,4 +208,12 @@ export async function deleteAgent(id: string): Promise<void> {
 /** Encerra o pty e guarda a ficha — o agente fica `stopped`. */
 export async function stopAgent(id: string): Promise<void> {
   await fetch(`/api/agents/${encodeURIComponent(id)}/stop`, { method: 'POST' })
+}
+
+/** Reabre a sessão onde ela parou, com `claude --resume`. */
+export async function resumeAgent(id: string): Promise<Agent> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(id)}/resume`, { method: 'POST' })
+  const body = (await res.json()) as { agent?: Agent; error?: string }
+  if (!res.ok || !body.agent) throw new Error(body.error || `resume: ${res.status}`)
+  return body.agent
 }

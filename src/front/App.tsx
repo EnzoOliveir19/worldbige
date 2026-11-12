@@ -9,21 +9,25 @@ import {
   deleteAgent,
   fetchAgents,
   fetchHealth,
+  MODEL_OPTIONS,
+  resumeAgent,
+  subscribeAgents,
   stopAgent,
   type Agent,
   type Health,
 } from './transport'
 
 /** Um painel na tela. `agent` é null enquanto o terminal ainda está medindo. */
-type Panel = { key: string; agent: Agent | null; cwd: string }
+type Panel = { key: string; agent: Agent | null; cwd: string; model: string }
 
 export function App() {
   const [panels, setPanels] = useState<Panel[]>([])
   const [health, setHealth] = useState<Health | null>(null)
   const [cwd, setCwd] = useState('')
+  const [model, setModel] = useState('')
   const [error, setError] = useState<string | null>(null)
-  // O cwd digitado no momento do clique, lido pelo painel quando ele resolver.
-  const pendingCwd = useRef<Map<string, string>>(new Map())
+  // O que estava escolhido no momento do clique, lido quando o painel resolver.
+  const pending = useRef<Map<string, { cwd: string; model: string }>>(new Map())
 
   const refreshHealth = useCallback(() => {
     fetchHealth().then(setHealth).catch(() => undefined)
@@ -38,7 +42,7 @@ export function App() {
           const known = new Set(prev.map((p) => p.agent?.id).filter(Boolean))
           const added = list
             .filter((a) => !known.has(a.id))
-            .map((a) => ({ key: a.id, agent: a, cwd: a.cwd }))
+            .map((a) => ({ key: a.id, agent: a, cwd: a.cwd, model: a.model ?? '' }))
           const updated = prev.map((p) =>
             p.agent ? { ...p, agent: list.find((a) => a.id === p.agent?.id) ?? p.agent } : p,
           )
@@ -49,17 +53,41 @@ export function App() {
     refreshHealth()
   }, [refreshHealth])
 
+  // Casa a lista do daemon com os painéis na tela, preservando os que ainda
+  // estão medindo (agent: null).
+  const merge = useCallback((list: Agent[]) => {
+    setPanels((prev) => {
+      const known = new Set(prev.map((p) => p.agent?.id).filter(Boolean))
+      const added = list
+        .filter((a) => !known.has(a.id))
+        .map((a) => ({ key: a.id, agent: a, cwd: a.cwd, model: a.model ?? '' }))
+      const updated = prev.map((p) =>
+        p.agent ? { ...p, agent: list.find((a) => a.id === p.agent?.id) ?? p.agent } : p,
+      )
+      return [...updated, ...added]
+    })
+  }, [])
+
   useEffect(() => {
     reload()
-    const t = setInterval(reload, 4000)
-    return () => clearInterval(t)
-  }, [reload])
+    // O estado chega empurrado pelo daemon: o status muda na hora, sem poll.
+    const off = subscribeAgents(merge)
+    // Poll lento só de rede de segurança, pro caso de o canal cair sem avisar.
+    const t = setInterval(refreshHealth, 10000)
+    return () => {
+      off()
+      clearInterval(t)
+    }
+  }, [reload, merge, refreshHealth])
 
   const onNew = () => {
     setError(null)
     const key = crypto.randomUUID()
-    pendingCwd.current.set(key, cwd.trim())
-    setPanels((prev) => [...prev, { key, agent: null, cwd: cwd.trim() || '(raiz dos repos)' }])
+    pending.current.set(key, { cwd: cwd.trim(), model })
+    setPanels((prev) => [
+      ...prev,
+      { key, agent: null, cwd: cwd.trim() || '(raiz dos repos)', model },
+    ])
   }
 
   /**
@@ -72,14 +100,15 @@ export function App() {
         const existing = panels.find((p) => p.key === key)?.agent
         if (existing) return existing.id
 
-        const requested = pendingCwd.current.get(key) ?? ''
+        const want = pending.current.get(key) ?? { cwd: '', model: '' }
         try {
           const agent = await createAgent({
             cols,
             rows,
-            ...(requested ? { cwd: requested } : {}),
+            ...(want.cwd ? { cwd: want.cwd } : {}),
+            ...(want.model ? { model: want.model } : {}),
           })
-          pendingCwd.current.delete(key)
+          pending.current.delete(key)
           setPanels((prev) => prev.map((p) => (p.key === key ? { ...p, agent, cwd: agent.cwd } : p)))
           return agent.id
         } catch (e: unknown) {
@@ -97,9 +126,21 @@ export function App() {
     reload()
   }
 
+  const onResume = async (id: string) => {
+    setError(null)
+    try {
+      await resumeAgent(id)
+      // A ficha velha é substituída por uma nova: recarrega e remonta o painel.
+      setPanels((prev) => prev.filter((p) => p.agent?.id !== id))
+      reload()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const onRemove = async (key: string, id?: string) => {
     if (id) await deleteAgent(id)
-    pendingCwd.current.delete(key)
+    pending.current.delete(key)
     setPanels((prev) => prev.filter((p) => p.key !== key))
   }
 
@@ -114,6 +155,18 @@ export function App() {
           onChange={(e) => setCwd(e.target.value)}
           spellCheck={false}
         />
+        <select
+          className="model"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          title="modelo do agente"
+        >
+          {MODEL_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
         <button onClick={onNew}>novo agente</button>
         <button onClick={reload}>recarregar</button>
       </header>
@@ -132,14 +185,28 @@ export function App() {
         <section className="agent" key={p.key}>
           <div className="agent-head">
             <span className="name">{p.agent?.name ?? 'medindo…'}</span>
-            {p.agent && <span className={`status status-${p.agent.status}`}>{p.agent.status}</span>}
+            {p.agent && (
+              <span className={`status status-${p.agent.status}`}>
+                {p.agent.status}
+                {p.agent.waitingTool ? `: ${p.agent.waitingTool}` : ''}
+              </span>
+            )}
             <span className="meta">{p.cwd}</span>
+            <span className="meta">{p.agent?.model || p.model || 'modelo da conta'}</span>
+            {p.agent?.sessionId && (
+              <span className="meta" title="session id — é o que o resume usa">
+                {p.agent.sessionId.slice(0, 8)}
+              </span>
+            )}
             {p.agent && (
               <span className="meta">
                 {p.agent.cols}×{p.agent.rows}
               </span>
             )}
             {p.agent?.live && <button onClick={() => void onStop(p.agent!.id)}>parar</button>}
+            {p.agent && !p.agent.live && p.agent.sessionId && (
+              <button onClick={() => void onResume(p.agent!.id)}>resumir</button>
+            )}
             <button onClick={() => void onRemove(p.key, p.agent?.id)}>remover</button>
           </div>
           <div className="agent-term">

@@ -11,13 +11,16 @@ import { findClaude } from './claude-bin.js'
 import { handleRequest } from './http.js'
 import {
   attachClient,
+  listAgents,
   resizeAgent,
   restoreAgents,
   stopAll,
+  sweepStale,
   writeToAgent,
   getAgent,
 } from './agents.js'
 import { ensureDataDirs, flushState } from './state.js'
+import { onAgentsChanged } from './events.js'
 
 ensureDataDirs()
 const restored = restoreAgents()
@@ -31,8 +34,33 @@ const server = http.createServer((req, res) => {
 // /ws/agents/<id> é a única rota que vira WebSocket.
 const wss = new WebSocketServer({ noServer: true })
 
+// ---------- canal de eventos ----------
+// Uma mudança de status chega aqui na hora. O front não precisa perguntar.
+const eventClients = new Set<WebSocket>()
+
+function pushAgents(): void {
+  if (!eventClients.size) return
+  const payload = JSON.stringify({ type: 'agents', agents: listAgents() })
+  for (const ws of eventClients) {
+    if (ws.readyState === ws.OPEN) ws.send(payload)
+  }
+}
+onAgentsChanged(pushAgents)
+
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', `http://${config.host}:${config.port}`)
+
+  if (url.pathname === '/ws/events') {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      eventClients.add(ws)
+      // Estado inicial de imediato, pra não esperar a primeira mudança.
+      ws.send(JSON.stringify({ type: 'agents', agents: listAgents() }))
+      ws.on('close', () => eventClients.delete(ws))
+      ws.on('error', () => eventClients.delete(ws))
+    })
+    return
+  }
+
   const match = /^\/ws\/agents\/([^/]+)$/.exec(url.pathname)
   if (!match) {
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
@@ -94,6 +122,12 @@ function attach(ws: WebSocket, id: string, url: URL): void {
   ws.on('close', () => unsubscribe())
   ws.on('error', () => unsubscribe())
 }
+
+// ---------- watchdog ----------
+// Varre de tempos em tempos quem está calado além do limite. Com Pre/PostToolUse
+// renovando a cada tool call, `stale` significa sinal perdido de verdade.
+const watchdog = setInterval(() => sweepStale(), 30_000)
+watchdog.unref()
 
 // ---------- ciclo de vida ----------
 let closing = false

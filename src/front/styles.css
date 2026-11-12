@@ -166,3 +166,25 @@ button:disabled {
 .xterm .xterm-viewport {
   background-color: transparent !important;
 }
+
+.model {
+  padding: 6px 9px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+}
+
+.status-awaiting_trust {
+  color: #ffb84d;
+  border-color: #6b4a1f;
+}
+
+.status-stale {
+  color: #c08a4a;
+}
+
+.status-done {
+  color: #6dbf8a;
+}
