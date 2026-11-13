@@ -31,6 +31,16 @@ export type PersistedAgent = {
    * log de eventos dele são escritos.
    */
   runId?: string
+  /**
+   * O tipo do run: o que decide a política de permissão, o brief do lead e o
+   * modelo default de cada papel.
+   *
+   * Mora na ficha de cada agente, e não só na do lead, porque é ele que a
+   * governa DEPOIS de um reinício do daemon: um helper aberto amanhã, num run
+   * retomado, tem que subir com a mesma política do lead que o abriu — e o
+   * lead já pode nem estar vivo pra consultar.
+   */
+  runType?: string
   /** o papel que o lead deu ao helper no `spawn_helper` */
   role?: string | null
   /** o último `report` do próprio agente; é o que o card recolhido mostra */

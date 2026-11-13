@@ -13,8 +13,8 @@
 // janela rápido demais e com ele perto, devagar demais.
 import { useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { AgentTerminal } from './AgentTerminal'
-import { statusLabel, statusTone, tintOf, waitsForYou } from './identity'
-import { CARD_H } from './canvas/geometry'
+import { statusLabel, statusTone, tintOf, toolLabel, waitsForYou } from './identity'
+import { CARD_H, focusRect } from './canvas/geometry'
 import type { Agent, AgentLayout } from './transport'
 
 const MIN_W = 360
@@ -27,6 +27,16 @@ type Props = {
   /** zoom corrente: converte pixel de tela em unidade de mundo */
   zoom: number
   focused: boolean
+  /**
+   * Quanto esta janela está ampliada por estar em foco.
+   *
+   * É escala de verdade — a janela fica maior e a fonte do terminal cresce
+   * junto —, não `transform`. Como as duas crescem pelo mesmo fator, o número
+   * de colunas e linhas não muda, e é isso que mantém a seleção do mouse
+   * funcionando: o xterm mede o retângulo do elemento e divide pelo tamanho da
+   * célula, e com `transform` só o primeiro escala.
+   */
+  scale: number
   /** leva a câmera até esta janela e entrega o teclado a ela */
   onFocus: () => void
   /** entrega só o teclado, sem mexer na câmera */
@@ -48,12 +58,16 @@ function basename(p: string): string {
 }
 
 export function AgentWindow(props: Props) {
-  const { agent, zoom, focused } = props
+  const { agent, zoom, focused, scale } = props
   const { layout } = agent
   const tint = tintOf(agent.tint)
   const alarm = waitsForYou(agent.status)
   const dragging = useRef(false)
   const rect = layout
+  // Um card recolhido não amplia: o que o foco aumenta é o texto do terminal,
+  // e um card não tem terminal — cresceria a caixa em volta do mesmo resumo,
+  // no mesmo corpo de letra.
+  const magnify = layout.collapsed ? 1 : scale
 
   // Durante o gesto a posição só existe na tela: `commit: false` atualiza o que
   // se vê (inclusive as setas, que são desenhadas lá fora), e só o `pointerup`
@@ -111,9 +125,12 @@ export function AgentWindow(props: Props) {
 
   const onResizeDown = (e: ReactPointerEvent<HTMLElement>) => {
     const from = { w: layout.w, h: layout.h }
+    // O delta chega em unidades de mundo (já dividido pelo zoom), mas numa
+    // janela em foco o que se vê é `mundo * scale`: sem dividir de novo, a
+    // borda fugiria do ponteiro 1,4 vez mais rápido que ele.
     gesture(e, (dx, dy) => ({
-      w: Math.max(MIN_W, Math.round(from.w + dx)),
-      h: Math.max(MIN_H, Math.round(from.h + dy)),
+      w: Math.max(MIN_W, Math.round(from.w + dx / magnify)),
+      h: Math.max(MIN_H, Math.round(from.h + dy / magnify)),
     }))
   }
 
@@ -149,14 +166,21 @@ export function AgentWindow(props: Props) {
 
   const collapsed = rect.collapsed
 
+  // O que vai pra tela. O layout de verdade (`rect`/`layout`) continua sendo o
+  // que os gestos leem e o que o daemon guarda — focar não redimensiona nada.
+  const painted = focusRect(
+    { x: rect.x, y: rect.y, w: rect.w, h: collapsed ? CARD_H : rect.h },
+    magnify,
+  )
+
   return (
     <article
       className={`win${focused ? ' is-focused' : ''}${alarm ? ' is-alarm' : ''}${collapsed ? ' is-card' : ''}`}
       style={{
-        left: rect.x,
-        top: rect.y,
-        width: rect.w,
-        height: collapsed ? CARD_H : rect.h,
+        left: painted.x,
+        top: painted.y,
+        width: painted.w,
+        height: painted.h,
         zIndex: layout.z,
         ['--tint' as string]: tint,
       }}
@@ -168,9 +192,14 @@ export function AgentWindow(props: Props) {
         {/* O nome diz quem é; o selo diz o que ele é no run. Fica calado de
             propósito — o destaque da janela pertence a `precisa de você`. */}
         <span className="role">{props.role}</span>
-        <span className={`pill tone-${statusTone(agent.status)}`}>
+        {/* O nome da ferramenta entra legível; o técnico fica no title, pra
+            quem precisar escrever uma regra de permissão com ele. */}
+        <span
+          className={`pill tone-${statusTone(agent.status)}`}
+          title={agent.waitingTool ?? undefined}
+        >
           {statusLabel(agent.status)}
-          {agent.waitingTool ? `: ${agent.waitingTool}` : ''}
+          {agent.waitingTool ? `: ${toolLabel(agent.waitingTool)}` : ''}
         </span>
         {/* O modelo vem com o motivo no title: um helper rodando em opus sem
             ninguém saber por quê é exatamente o que a tabela de roteamento
@@ -239,7 +268,11 @@ export function AgentWindow(props: Props) {
               }
             }}
           >
-            <AgentTerminal resolveAgent={props.resolveAgent} focused={focused} />
+            <AgentTerminal
+              resolveAgent={props.resolveAgent}
+              focused={focused}
+              fontScale={magnify}
+            />
           </div>
           <span className="win-grip" onPointerDown={onResizeDown} aria-hidden="true" />
         </>

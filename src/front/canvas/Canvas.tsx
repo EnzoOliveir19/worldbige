@@ -37,14 +37,41 @@ export function Canvas({ camera, onCamera, onBackground, children }: Props) {
   useEffect(() => {
     const el = rootRef.current
     if (!el) return
+    // Ouvinte de CAPTURA, e isso é a parte que importa.
+    //
+    // A roda em cima de um terminal é do terminal: ela rola o scrollback, como
+    // rolaria em qualquer terminal. Só com Ctrl é que ela vira zoom — a
+    // convenção de todo canvas, e o jeito de aproximar sem tirar o ponteiro de
+    // cima da janela que você está lendo.
+    //
+    // Na bolha isso não se implementa. O xterm rola o scrollback por conta
+    // própria, mexendo no `scrollTop` na mão, e não pela ação padrão do
+    // navegador — então um `preventDefault` daqui, que roda depois dele, não
+    // desfaz a rolagem que já aconteceu (medido: com Ctrl, o canvas aproximava
+    // E o terminal rolava junto). Na captura este ouvinte roda na descida,
+    // antes do xterm, e o `stopPropagation` do caso com Ctrl faz o evento nem
+    // chegar lá.
     const onWheel = (e: WheelEvent) => {
-      e.preventDefault()
+      const target = e.target
+      const overTerminal = target instanceof Element && target.closest('.win-term') !== null
+
+      if (e.ctrlKey) {
+        // Zoom em qualquer lugar. O cancelamento é obrigatório: sem ele, o
+        // Ctrl+roda vira zoom da PÁGINA e escala a interface inteira.
+        e.preventDefault()
+        e.stopPropagation()
+      } else if (overTerminal) {
+        return // é do terminal: deixa descer
+      } else {
+        e.preventDefault()
+      }
+
       const r = el.getBoundingClientRect()
       const factor = Math.exp(-e.deltaY * 0.0014)
       onCamera(zoomAt(camRef.current, e.clientX - r.left, e.clientY - r.top, factor))
     }
-    el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
+    el.addEventListener('wheel', onWheel, { passive: false, capture: true })
+    return () => el.removeEventListener('wheel', onWheel, { capture: true })
   }, [onCamera])
 
   // Espaço arrasta o canvas — menos quando o teclado está dentro de um terminal,

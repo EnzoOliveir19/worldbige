@@ -21,6 +21,7 @@ import {
 import type { HookEvent } from './status.js'
 import { allowedRoots, CwdRefused } from './cwd.js'
 import { handleMcpRequest } from './mcp.js'
+import { isRunTypeId, runTypeOptions } from './run-types.js'
 
 export function json(res: ServerResponse, code: number, body: unknown): void {
   const payload = JSON.stringify(body)
@@ -139,6 +140,10 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
         // A gaveta desenha um ponto por vaga de helper; sem o limite ela não
         // tem como dizer quantas vagas existem.
         maxHelpers: config.maxHelpers,
+        // Os tipos de run vêm do daemon e não de uma lista no front: quem sabe
+        // quais existem é quem carrega as políticas e os briefs, e acrescentar
+        // um tipo não pode exigir editar o front junto.
+        runTypes: runTypeOptions(),
         uptimeMs: Math.round(process.uptime() * 1000),
       })
     }
@@ -150,12 +155,24 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
     if (pathname === '/api/agents' && req.method === 'POST') {
       const raw = await readBody(req)
       const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+      // O dropdown começa em "auto", que quer dizer "o default do tipo de
+      // run". Por isso `auto` vira `undefined` e NÃO `null`: `null` é a outra
+      // opção do dropdown, "padrão da conta", que é uma escolha explícita de
+      // não passar `--model`. As duas somem no mesmo valor se a gente não
+      // separar aqui, e aí o "auto" nunca aconteceria.
+      const wanted = typeof body.model === 'string' ? body.model : 'auto'
       const agent = createAgent({
         name: typeof body.name === 'string' ? body.name : undefined,
         cwd: typeof body.cwd === 'string' && body.cwd ? body.cwd : undefined,
         cols: typeof body.cols === 'number' ? body.cols : undefined,
         rows: typeof body.rows === 'number' ? body.rows : undefined,
-        model: parseModel(body.model),
+        ...(wanted === 'auto' ? {} : { model: parseModel(wanted) }),
+        // O tipo do run decide política, brief do lead e modelo por papel.
+        // Só vale pro agente raiz: um helper herda o de quem o abriu.
+        ...(isRunTypeId(body.runType) ? { runType: body.runType } : {}),
+        ...(typeof body.subject === 'string' && body.subject.trim()
+          ? { subject: body.subject.trim() }
+          : {}),
         // Quem abriu este agente. Hoje vem do botão de helper no canvas; na
         // unidade 4 vai vir do `after` do `spawn_helper`, pelo mesmo campo.
         parentId: typeof body.parentId === 'string' && body.parentId ? body.parentId : null,
@@ -164,9 +181,9 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
         ...(body.layout && typeof body.layout === 'object'
           ? { layout: body.layout as Partial<AgentLayout> }
           : {}),
-        // Política de permissão do run type. A unidade 5 é quem monta as
-        // listas; aqui é só o cano por onde elas chegam — e é o que permite
-        // provocar um prompt de permissão numa conta que roda em auto mode.
+        // Uma política explícita, que vence a do tipo de run. Não tem botão no
+        // front: é o cano por onde um teste provoca uma política à mão sem
+        // precisar inventar um tipo de run pra isso.
         ...(body.permissions && typeof body.permissions === 'object'
           ? { permissions: body.permissions as Record<string, unknown> }
           : {}),

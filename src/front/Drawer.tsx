@@ -6,7 +6,7 @@
 // mesma informação, reduzida ao que cabe em 48 pixels: quem existe, de que cor,
 // e quem está chamando.
 import { useEffect, useRef, useState } from 'react'
-import { elapsed, roleOf, statusLabel, statusTone, tintOf, waitsForYou } from './identity'
+import { elapsed, roleOf, statusLabel, statusTone, tintOf, toolLabel, waitsForYou } from './identity'
 import { MODEL_OPTIONS, type Agent, type Health } from './transport'
 
 type Props = {
@@ -20,21 +20,29 @@ type Props = {
   health: Health | null
   focusedId: string | null
   onGoTo: (id: string) => void
-  onNew: (input: { cwd: string; model: string }) => void
+  onNew: (input: { cwd: string; model: string; runType: string; subject: string }) => void
   now: number
 }
+
+/** O que a gaveta mostra enquanto o `/api/health` não respondeu. */
+const RUN_TYPES_FALLBACK = [{ id: 'freeform', label: 'freeform', hint: '' }]
 
 export function Drawer(props: Props) {
   const { agents, health, open } = props
   const [query, setQuery] = useState('')
   const [cwd, setCwd] = useState('')
-  const [model, setModel] = useState('')
+  // `auto` é o estado inicial: a escolha de modelo passou a ser automática, e
+  // o dropdown só existe pra sobrepor quando alguém tem motivo.
+  const [model, setModel] = useState('auto')
+  const [runType, setRunType] = useState('freeform')
+  const [subject, setSubject] = useState('')
   const searchRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     if (open && props.searchTick > 0) searchRef.current?.focus()
   }, [open, props.searchTick])
 
+  const runTypes = health?.runTypes?.length ? health.runTypes : RUN_TYPES_FALLBACK
   const live = agents.filter((a) => a.live).length
   const limit = health?.maxHelpers ?? 3
   const waiting = agents.filter((a) => waitsForYou(a.status)).length
@@ -137,7 +145,15 @@ export function Drawer(props: Props) {
                 {/* O mesmo selo da janela: quem coordena se lê na lista também,
                     sem precisar ir até o canvas conferir de quem sai a seta. */}
                 <span className="role">{roleOf(a, agents)}</span>
-                <span className={`pill tone-${statusTone(a.status)}`}>{statusLabel(a.status)}</span>
+                {/* Na lista cabe só o status; a ferramenta que está esperando
+                    aprovação vai no title, legível — é a pergunta seguinte de
+                    quem vê um `precisa de você` aqui. */}
+                <span
+                  className={`pill tone-${statusTone(a.status)}`}
+                  title={a.waitingTool ? `esperando: ${toolLabel(a.waitingTool)}` : undefined}
+                >
+                  {statusLabel(a.status)}
+                </span>
               </button>
             </li>
           ))}
@@ -175,6 +191,20 @@ export function Drawer(props: Props) {
             }
             spellCheck={false}
           />
+          {/* O tipo do run vem antes do modelo porque é a escolha que decide
+              as outras: ele traz a política, o brief do lead e o default de
+              modelo de cada papel. */}
+          <select
+            value={runType}
+            onChange={(e) => setRunType(e.target.value)}
+            title={runTypes.find((t) => t.id === runType)?.hint ?? 'o tipo do run'}
+          >
+            {runTypes.map((t) => (
+              <option key={t.id} value={t.id} title={t.hint}>
+                {t.label}
+              </option>
+            ))}
+          </select>
           <select value={model} onChange={(e) => setModel(e.target.value)} title="modelo do agente">
             {MODEL_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
@@ -182,7 +212,21 @@ export function Drawer(props: Props) {
               </option>
             ))}
           </select>
-          <button className="go" onClick={() => props.onNew({ cwd: cwd.trim(), model })}>
+          {/* O assunto entra no brief do lead. Num review de PR é o PR; num
+              freeform é o que se quer. Vazio, o brief manda perguntar — que é
+              melhor do que o lead inventar um objetivo. */}
+          <input
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            placeholder={runType === 'review-pr' ? 'qual PR (número ou URL)' : 'pra que é este run'}
+            spellCheck={false}
+          />
+          <button
+            className="go"
+            onClick={() =>
+              props.onNew({ cwd: cwd.trim(), model, runType, subject: subject.trim() })
+            }
+          >
             novo agente
           </button>
         </div>

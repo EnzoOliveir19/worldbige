@@ -75,6 +75,32 @@ export function roleOf(agent: Agent, all: Agent[]): string {
   return agent.role ? `helper · ${agent.role}` : 'helper'
 }
 
+/**
+ * O nome de uma ferramenta, do jeito que se lê.
+ *
+ * O selo de `precisa de você` mostra o que está esperando aprovação, e o nome
+ * técnico de um tool de MCP é ilegível no meio de um card:
+ * `mcp__claude_ai_Linear__save_issue` ocupa a linha inteira e esconde a única
+ * palavra que importa, que é `save_issue`. Com o `ask` enumerado da política do
+ * reviewer, esses nomes passam a aparecer no card o tempo todo.
+ *
+ * Três formas, na ordem:
+ *   - conector do claude.ai (`mcp__claude_ai_Google_Calendar__list_events`) →
+ *     `Google Calendar · list_events`; o servidor vem com `_` no lugar dos
+ *     espaços, e devolvê-los é o que o torna um nome de produto de novo;
+ *   - qualquer outro MCP (`mcp__worldbige__spawn_helper`) →
+ *     `worldbige · spawn_helper`;
+ *   - ferramenta nativa (`Bash`, `Read`) → ela mesma, que já se lê.
+ */
+export function toolLabel(tool: string | null | undefined): string {
+  if (!tool) return ''
+  const connector = /^mcp__claude_ai_(.+?)__(.+)$/.exec(tool)
+  if (connector) return `${(connector[1] as string).replace(/_/g, ' ')} · ${connector[2]}`
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
+  if (mcp) return `${mcp[1]} · ${mcp[2]}`
+  return tool
+}
+
 /** `run-20261112-100353-4105` → `run 4105`. O sufixo é o que distingue. */
 export function shortRun(runId: string): string {
   const tail = runId.split('-').pop()

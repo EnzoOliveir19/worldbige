@@ -10,7 +10,7 @@ import { Drawer } from './Drawer'
 import { roleOf } from './identity'
 import { Canvas } from './canvas/Canvas'
 import { Arrows } from './canvas/Arrows'
-import { WIN_H, WIN_W, placeNew, rectOf } from './canvas/geometry'
+import { FOCUS_SCALE, WIN_H, WIN_W, focusRect, placeNew, rectOf } from './canvas/geometry'
 import {
   FOCUS_Z,
   IDENTITY,
@@ -82,6 +82,7 @@ function ghostAgent(
     // Um fantasma ainda não pertence a run nenhum: quem decide isso é o daemon,
     // no instante em que o agente nasce de verdade.
     runId: '',
+    runType: '',
     role: null,
     note: null,
     waitingTool: null,
@@ -113,9 +114,18 @@ export function App() {
   const camRef = useRef(camera)
   camRef.current = camera
   // O que estava escolhido no clique, lido quando o painel resolver.
-  const pending = useRef<Map<string, { cwd: string; model: string; parentId: string | null }>>(
-    new Map(),
-  )
+  const pending = useRef<
+    Map<
+      string,
+      {
+        cwd: string
+        model: string
+        parentId: string | null
+        runType?: string
+        subject?: string
+      }
+    >
+  >(new Map())
 
   // ---------- o que o daemon sabe ----------
 
@@ -163,6 +173,51 @@ export function App() {
       return over ? { ...base, layout: { ...base.layout, ...over } } : base
     })
   }, [panels, agents, overrides])
+
+  /**
+   * Esta janela está ampliada por estar em foco?
+   *
+   * Um painel pode estar em foco pela chave (enquanto é fantasma) ou pelo id
+   * do agente (depois que nasceu) — a mesma conta que decide `focused`.
+   */
+  const scaleOf = useCallback(
+    (panel: Panel, agentId: string): number => {
+      // Um fantasma — a janela que ainda está medindo o terminal pra fazer o
+      // agente nascer — NUNCA amplia, mesmo nascendo em foco.
+      //
+      // É essa medida que define as colunas e linhas da sessão, e ela tem que
+      // acontecer no tamanho real. Ampliado, o terminal mede 2 colunas a mais:
+      // a janela cresce 1,4 mas o cromo (cabeçalho, margens, padding) não
+      // cresce nada, então a área útil cresce 1,43 e sobra espaço pra mais
+      // coluna. O agente nasceria com 101 colunas e o primeiro desfoque o
+      // corrigiria pra 99 — um resize de verdade, logo um repaint da TUI,
+      // exatamente o que esta mudança existe pra não ter.
+      if (!panel.agentId) return 1
+      return focusedId === agentId || focusedId === panel.key ? FOCUS_SCALE : 1
+    },
+    [focusedId],
+  )
+
+  /**
+   * As setas enxergam a janela ampliada, não a de baixo.
+   *
+   * O colchete encosta na borda do que está desenhado; se ele usasse o
+   * retângulo normal, a ponta da linha ficaria escondida atrás da janela em
+   * foco, que é maior.
+   */
+  const linked = useMemo(
+    () =>
+      shown.map((a, i) => {
+        const scale = scaleOf(panels[i] as Panel, a.id)
+        // Card recolhido não amplia — a janela também não amplia, e as duas
+        // contas têm que dar o mesmo, senão a linha erra a borda.
+        if (scale === 1 || a.layout.collapsed) return a
+        const r = focusRect(rectOf(a), scale)
+        // `collapsed` mantém a altura do card; o retângulo já veio com ela.
+        return { ...a, layout: { ...a.layout, x: r.x, y: r.y, w: r.w, h: r.h, collapsed: false } }
+      }),
+    [shown, panels, scaleOf],
+  )
 
   // ---------- câmera ----------
 
@@ -249,13 +304,27 @@ export function App() {
   // ---------- abrir, mover, fechar ----------
 
   const openAgent = useCallback(
-    (input: { cwd: string; model: string; parentId?: string | null }) => {
+    (input: {
+      cwd: string
+      model: string
+      parentId?: string | null
+      runType?: string
+      subject?: string
+    }) => {
       setError(null)
       const key = crypto.randomUUID()
       const parentId = input.parentId ?? null
       const spot = placeNew(shown, parentId)
       const layout: AgentLayout = { ...spot, w: WIN_W, h: WIN_H, collapsed: false, z: 999 }
-      pending.current.set(key, { cwd: input.cwd, model: input.model, parentId })
+      pending.current.set(key, {
+        cwd: input.cwd,
+        model: input.model,
+        parentId,
+        // Só o agente raiz leva tipo e assunto: um helper herda o run inteiro
+        // de quem o abriu, e mandá-los aqui seria o front opinando sobre uma
+        // decisão que é do daemon.
+        ...(parentId ? {} : { runType: input.runType, subject: input.subject }),
+      })
       setGhosts((prev) => [
         ...prev,
         { key, agentId: null, agent: ghostAgent(key, layout, input.cwd, input.model, parentId) },
@@ -282,7 +351,12 @@ export function App() {
             cols,
             rows,
             ...(want.cwd ? { cwd: want.cwd } : {}),
-            ...(want.model ? { model: want.model } : {}),
+            // O modelo vai SEMPRE, inclusive vazio: `''` é "padrão da conta" e
+            // ausente é "auto", e omitir o campo quando a escolha é vazia faria
+            // as duas opções do dropdown darem no mesmo.
+            model: want.model,
+            ...(want.runType ? { runType: want.runType } : {}),
+            ...(want.subject ? { subject: want.subject } : {}),
             ...(want.parentId ? { parentId: want.parentId } : {}),
             // Sem o `z`: o lugar na tela é do front, a ordem de empilhamento é
             // do daemon, que é quem vê todas as janelas.
@@ -346,7 +420,7 @@ export function App() {
   return (
     <div className={`app${drawerOpen ? ' drawer-open' : ''}`} ref={viewRef}>
       <Canvas camera={camera} onCamera={setCamera} onBackground={() => setFocusedId(null)}>
-        <Arrows agents={shown} />
+        <Arrows agents={linked} />
         {panels.map((panel, i) => {
           const agent = shown[i] as Agent
           return (
@@ -355,6 +429,7 @@ export function App() {
               agent={agent}
               role={roleOf(agent, shown)}
               zoom={camera.z}
+              scale={scaleOf(panel, agent.id)}
               focused={focusedId === agent.id || focusedId === panel.key}
               onFocus={() => goTo(agent.id)}
               onTouch={() => touch(agent.id)}

@@ -31,6 +31,38 @@ export function rectOf(agent: Agent): Rect {
 }
 
 /**
+ * Quanto a janela em foco cresce. Mexa aqui pra calibrar.
+ *
+ * 1.4 é o zoom do voo antigo, e é de propósito: a sensação é a mesma, o
+ * mecanismo é que mudou.
+ */
+export const FOCUS_SCALE = 1.4
+
+/**
+ * O retângulo de uma janela em foco: o mesmo, maior, em volta do mesmo centro.
+ *
+ * Crescer em volta do centro é o que faz a janela inchar no lugar em vez de
+ * escorregar pra baixo e pra direita — e, como o centro não se move, a câmera
+ * que centraliza o retângulo normal já centraliza este aqui.
+ *
+ * Este tamanho é de TELA, e não existe no daemon: focar não é redimensionar.
+ * Nenhum gesto de arrastar ou redimensionar lê daqui, e nada disto vai parar
+ * num `PATCH /layout` — senão enquadrar uma janela gravaria o tamanho ampliado
+ * como se você a tivesse esticado.
+ */
+export function focusRect(rect: Rect, scale: number): Rect {
+  if (scale === 1) return rect
+  const w = Math.round(rect.w * scale)
+  const h = Math.round(rect.h * scale)
+  return {
+    x: Math.round(rect.x - (w - rect.w) / 2),
+    y: Math.round(rect.y - (h - rect.h) / 2),
+    w,
+    h,
+  }
+}
+
+/**
  * Onde uma janela nova entra: no fim da coluna de quem a abriu — os helpers de
  * um agente ficam numa coluna à direita dele, empilhados e alinhados pelo topo.
  * Uma raiz nova entra à direita de tudo que já existe, subárvores incluídas.

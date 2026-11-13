@@ -10,6 +10,7 @@
 // sobrescreve nada: um run é um registro do que aconteceu, e um registro que se
 // reescreve não serve pra reconstruir uma timeline depois.
 import { randomBytes } from 'node:crypto'
+import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { paths } from './config.js'
@@ -54,6 +55,29 @@ export async function writeRunFile(
   const file = path.join(runDir(runId), relative)
   await fsp.mkdir(path.dirname(file), { recursive: true })
   await fsp.writeFile(file, content, 'utf8')
+  return file
+}
+
+/**
+ * O brief do lead, escrito antes de o pty existir.
+ *
+ * É síncrono, ao contrário de tudo o mais aqui, porque `createAgent` é
+ * síncrono: o caminho do arquivo precisa estar pronto pra entrar na primeira
+ * mensagem da fila, e esperar uma promessa aqui abriria uma janela em que o
+ * agente já está de pé sem ter o que ler.
+ */
+export function writeLeadBrief(
+  runId: string,
+  agent: { id: string; name: string },
+  content: string,
+): string {
+  const file = path.join(
+    runDir(runId),
+    'briefs',
+    `${slug(agent.name, 'lead')}-${agent.id.slice(0, 8)}.md`,
+  )
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, content, 'utf8')
   return file
 }
 

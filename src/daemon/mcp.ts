@@ -34,25 +34,6 @@ import {
 import { doneNotice, reportNotice } from './outbox.js'
 import { freePath, runDir, slug, writeRunFile } from './runs.js'
 
-// ---------- o modelo de cada helper ----------
-
-/**
- * O modelo de um helper quando o lead não escolhe nenhum.
- *
- * O padrão é automático: quem escolhe é o lead, por helper, seguindo a tabela
- * de roteamento — review de PR/arquitetura em opus, busca e triagem em sonnet,
- * skeptic e bug difícil em fable, na dúvida sonnet. A tabela é um arquivo
- * editável e os defaults por papel saem do tipo de run; as duas coisas são da
- * unidade 5, e é aqui que elas se encaixam.
- *
- * Até lá, `null` quer dizer o padrão da conta: o daemon não passa `--model` e
- * quem decide é a configuração do Enzo. É a escolha honesta — inventar um
- * default aqui seria fingir uma política que ainda não foi escrita.
- */
-function defaultModelForRole(_role: string): AgentModel {
-  return null
-}
-
 // ---------- a fila de spawn ----------
 //
 // Um run tem um teto de helpers simultâneos. Acima dele o spawn não bloqueia e
@@ -67,7 +48,8 @@ type QueuedSpawn = {
   brief: string
   briefFile: string
   cwd: string
-  model: AgentModel
+  /** `undefined` = o lead não escolheu: decide o tipo de run / a tabela */
+  model: AgentModel | undefined
   modelReason: string | null
 }
 
@@ -264,7 +246,11 @@ function buildServer(caller: Agent): McpServer {
         return fail(`Não existe agente com id ${after}. Veja os ids em list_helpers.`)
       }
       const parentId = after || caller.id
-      const model = args.model ? parseModel(args.model) : defaultModelForRole(args.role)
+      // Sem `model`, não se decide nada aqui: o `undefined` desce até o
+      // `createAgent`, que é o único lugar onde "auto" é resolvido — pelo
+      // default do papel no tipo de run, e pela tabela de roteamento no fim.
+      // Resolver nos dois lugares daria duas respostas pra mesma pergunta.
+      const model = args.model ? parseModel(args.model) : undefined
       const briefFile = await writeRunFile(
         caller.runId,
         path.join('briefs', `${slug(args.name)}-${Date.now().toString(36)}.md`),
@@ -307,6 +293,10 @@ function buildServer(caller: Agent): McpServer {
               id: helper.id,
               name: helper.name,
               model: helper.model ?? 'padrão da conta',
+              // Quando o lead não escolheu, o motivo diz qual regra escolheu
+              // por ele — a linha da tabela que casou, ou o default do tipo de
+              // run. É o mesmo texto que aparece no cabeçalho da janela.
+              model_reason: helper.modelReason,
               cwd: helper.cwd,
               brief: briefFile,
               note: 'Ele já recebeu a ordem de ler o brief. Acompanhe com list_helpers.',

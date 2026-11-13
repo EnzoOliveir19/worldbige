@@ -25,6 +25,12 @@ export const MAX_Z = 2.5
  * transform escala) e dividindo pelo tamanho da célula (que ela não escala):
  * em qualquer zoom diferente de 1 a conta dá errado e a seleção do mouse pega
  * outro pedaço de texto. Pousar em 1 é o que devolve a seleção.
+ *
+ * A ampliação do foco não sumiu por causa disso — ela mudou de mecanismo. Quem
+ * cresce é a janela, junto com a fonte do terminal, pelo mesmo fator
+ * (`FOCUS_SCALE`, em `geometry.ts`): o texto fica maior e nítido, as colunas e
+ * linhas não mudam, e a conta do xterm continua certa porque o elemento e a
+ * célula cresceram juntos. A câmera fica em 1 o tempo todo.
  */
 export const FOCUS_Z = 1
 

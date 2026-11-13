@@ -599,10 +599,22 @@ body.dragging .win-head {
   margin-top: 8px;
 }
 
+/*
+ * Duas colunas só pros dois selects (tipo de run e modelo), que são curtos e se
+ * leem como um par de escolhas. O que é texto livre — o repo e o assunto — e o
+ * botão ocupam a linha inteira: um campo de caminho pela metade da gaveta não
+ * mostra o caminho.
+ */
 .new {
   display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 6px;
   margin-top: 11px;
+}
+
+.new input,
+.new .go {
+  grid-column: 1 / -1;
 }
 
 .new .go {

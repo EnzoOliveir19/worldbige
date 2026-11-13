@@ -79,7 +79,19 @@ export function connectAgent(
 
 export type AgentModel = 'opus' | 'sonnet' | 'haiku' | 'fable' | null
 
+/**
+ * O dropdown começa em `auto`, que quer dizer "o default do tipo de run".
+ *
+ * A escolha de modelo deixou de ser um gesto por agente: o normal é o tipo de
+ * run e a tabela de roteamento decidirem, e escolher na mão é a exceção — que
+ * continua existindo logo abaixo, e que sobrepõe tudo quando usada.
+ *
+ * `auto` e `padrão da conta` são coisas diferentes de propósito: a segunda é a
+ * escolha explícita de não passar `--model` nenhum e deixar a configuração da
+ * conta decidir.
+ */
 export const MODEL_OPTIONS: { value: string; label: string }[] = [
+  { value: 'auto', label: 'auto (o default do tipo de run)' },
   { value: '', label: 'padrão da conta' },
   { value: 'opus', label: 'opus' },
   { value: 'sonnet', label: 'sonnet' },
@@ -135,6 +147,8 @@ export type Agent = {
   modelReason: string | null
   /** a que run ele pertence */
   runId: string
+  /** o tipo do run: é quem decide política, brief do lead e modelo por papel */
+  runType: string
   /** o papel dado pelo lead no `spawn_helper` */
   role: string | null
   /** o último `report` dele */
@@ -148,11 +162,15 @@ export type Agent = {
   tint: number
 }
 
+export type RunTypeOption = { id: string; label: string; hint: string }
+
 export type Health = {
   ok: boolean
   reposRoot: string
   allowedRoots: string[]
   maxHelpers: number
+  /** quais tipos de run existem; quem sabe é o daemon, que carrega as políticas */
+  runTypes?: RunTypeOption[]
   buffer: { agents: number; bytes: number }
 }
 
@@ -222,7 +240,12 @@ export async function createAgent(input: {
   cwd?: string
   cols?: number
   rows?: number
+  /** `auto` (o default do tipo de run), `''` (padrão da conta), ou um modelo */
   model?: string
+  /** o tipo do run; só vale pro agente raiz — um helper herda o de quem o abriu */
+  runType?: string
+  /** o que este run é pra fazer, em uma linha; vai pro brief do lead */
+  subject?: string
   /** quem abriu este agente; vira a seta no canvas */
   parentId?: string | null
   /**

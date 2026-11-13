@@ -29,6 +29,9 @@ import { connectAgent, type Transport } from './transport'
 
 const RESIZE_DEBOUNCE_MS = 150
 
+/** O corpo da fonte em escala 1. A janela em foco multiplica isto. */
+const BASE_FONT_SIZE = 13
+
 /**
  * A paleta do terminal.
  *
@@ -83,6 +86,15 @@ type Props = {
   resolveAgent: (cols: number, rows: number) => Promise<string | null>
   /** a janela está em foco: o teclado tem que estar aqui dentro */
   focused?: boolean
+  /**
+   * O fator de ampliação do foco.
+   *
+   * A janela cresce por ele e a fonte cresce junto, pelo mesmo número — é esse
+   * casamento que mantém colunas e linhas iguais, e portanto o pty intocado: o
+   * Claude não repinta, a seleção continua pegando o texto certo, e o texto
+   * fica nítido porque quem cresceu foi a fonte, não um bitmap esticado.
+   */
+  fontScale?: number
 }
 
 /** Espera o layout assentar: dois frames depois das fontes. */
@@ -92,12 +104,15 @@ function layoutSettled(): Promise<void> {
   })
 }
 
-export function AgentTerminal({ resolveAgent, focused = false }: Props) {
+export function AgentTerminal({ resolveAgent, focused = false, fontScale = 1 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   // O terminal vivo, pra poder devolver o foco quando a câmera chega na janela.
   const termRef = useRef<Terminal | null>(null)
   // O último tamanho que o daemon já conhece. Nunca remandamos o mesmo.
   const lastSent = useRef<{ cols: number; rows: number } | null>(null)
+  // A escala corrente, lida de dentro do observador — que é criado uma vez só.
+  const scaleRef = useRef(fontScale)
+  scaleRef.current = fontScale
   // A prop muda de identidade a cada render do pai; guardada num ref, o efeito
   // abaixo roda uma vez só por montagem. Sem isso o terminal seria recriado a
   // cada render — e cada recriação é uma reconexão, que é o que queremos evitar.
@@ -118,7 +133,7 @@ export function AgentTerminal({ resolveAgent, focused = false }: Props) {
     // (ou WebGL) desenharia num bitmap, que o zoom borraria.
     const term = new Terminal({
       fontFamily: '"JetBrains Mono Variable", "JetBrains Mono", Consolas, monospace',
-      fontSize: 13,
+      fontSize: BASE_FONT_SIZE,
       // Mais ar entre as linhas que num terminal de sistema: a janela é pra ser
       // lida de longe, com o canvas afastado, não só de perto.
       lineHeight: 1.35,
@@ -255,6 +270,20 @@ export function AgentTerminal({ resolveAgent, focused = false }: Props) {
       window.clearTimeout(debounce)
       debounce = window.setTimeout(() => {
         if (disposed || !transport) return
+        // Ampliar pelo foco mexe no elemento, e o observador não tem como
+        // saber disso sozinho — pra ele é um redimensionamento como outro
+        // qualquer. Mas não é: o pty tem que ficar exatamente como está.
+        //
+        // Por que não simplesmente medir e confiar que dá o mesmo: a conta do
+        // fit desconta a barra de rolagem e o padding do espaço disponível, e
+        // esses não crescem com a fonte. Um `floor` em cima disso erra por uma
+        // coluna de vez em quando — e uma coluna a mais é um resize de verdade,
+        // que é um repaint da TUI inteira.
+        //
+        // Um arrasto no canto DURANTE o foco não se perde: ele muda o layout
+        // de base, e a medição acontece ao sair do foco, quando a janela volta
+        // ao tamanho real.
+        if (scaleRef.current !== 1) return
         try {
           fit.fit()
         } catch {
@@ -355,6 +384,22 @@ export function AgentTerminal({ resolveAgent, focused = false }: Props) {
   useEffect(() => {
     if (focused) termRef.current?.focus()
   }, [focused])
+
+  /**
+   * A fonte acompanha a janela.
+   *
+   * Trocar `fontSize` NÃO redimensiona o terminal: o xterm remede a célula e
+   * repinta o que já está na tela, mas colunas e linhas só mudam em
+   * `term.resize()`, que só o observador acima chama. É por isso que ampliar
+   * não fala com o daemon.
+   */
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    const size = BASE_FONT_SIZE * fontScale
+    if (term.options.fontSize === size) return
+    term.options.fontSize = size
+  }, [fontScale])
 
   return <div className="term-host" ref={hostRef} />
 }

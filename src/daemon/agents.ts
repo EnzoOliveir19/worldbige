@@ -27,7 +27,15 @@ import { isTrusted } from './trust.js'
 import { emitAgentsChanged } from './events.js'
 import { removeAgentSettings, writeAgentSettings } from './hook-settings.js'
 import { removeAgentMcpConfig, writeAgentMcpConfig } from './mcp-config.js'
-import { appendHookLog, newRunId, summarize } from './runs.js'
+import { appendHookLog, newRunId, summarize, writeLeadBrief } from './runs.js'
+import {
+  DEFAULT_RUN_TYPE,
+  defaultModelForRole,
+  isRunTypeId,
+  leadBrief,
+  runType,
+  type RunTypeId,
+} from './run-types.js'
 import {
   clear as outboxClear,
   enqueue as outboxEnqueue,
@@ -139,6 +147,11 @@ export type Agent = {
   modelReason: string | null
   /** a que run este agente pertence; é a pasta onde o que ele produz fica */
   runId: string
+  /**
+   * O tipo do run: quem decide a política de permissão desta sessão, o brief
+   * que o lead recebe e o modelo default de cada papel.
+   */
+  runType: RunTypeId
   /** o papel dado pelo lead no `spawn_helper` */
   role: string | null
   /** o último `report` do próprio agente */
@@ -392,6 +405,7 @@ function persist(): void {
       model: agent.model,
       modelReason: agent.modelReason,
       runId: agent.runId,
+      runType: agent.runType,
       role: agent.role,
       note: agent.note,
       layout: agent.layout,
@@ -460,6 +474,10 @@ function toAgent(p: PersistedAgent, index: number): Agent {
     modelReason: p.modelReason ?? null,
     // Vazio aqui é resolvido na segunda passada do `restoreAgents`.
     runId: p.runId ?? '',
+    // Ficha gravada antes dos tipos de run é freeform: é o tipo que não
+    // restringe nada, e promover uma sessão antiga a reviewer na retomada
+    // mudaria a política dela sem ninguém ter pedido.
+    runType: isRunTypeId(p.runType) ? p.runType : DEFAULT_RUN_TYPE,
     role: p.role ?? null,
     // O `report` é do agente, não da sessão: ele sobrevive ao reinício, senão
     // um card recolhido perderia o resumo só porque o daemon caiu.
@@ -487,6 +505,12 @@ export type SpawnOptions = {
   cwd?: string
   cols?: number
   rows?: number
+  /**
+   * O modelo escolhido na mão. **`undefined` é "auto"**, e é por isso que ele
+   * não é a mesma coisa que `null`: `null` é a escolha explícita de "padrão da
+   * conta" (não passa `--model`), e `undefined` é "ninguém escolheu" — aí quem
+   * decide é o tipo de run, pelo papel, com a tabela de roteamento no fim.
+   */
   model?: AgentModel
   /** por que esse modelo, em uma linha */
   modelReason?: string | null
@@ -494,8 +518,20 @@ export type SpawnOptions = {
   role?: string | null
   /** o run a que ele pertence; sem isso herda do pai, ou abre um novo */
   runId?: string
+  /** o tipo do run; sem isso herda do pai, ou é o default */
+  runType?: RunTypeId
+  /** o que este run é pra fazer, em uma linha; vai pro brief do lead */
+  subject?: string | null
+  /**
+   * Esta sessão é a retomada de outra.
+   *
+   * Um lead retomado NÃO recebe o brief de novo: ele já está no transcript que
+   * o `--resume` trouxe de volta, e digitá-lo outra vez mandaria o agente
+   * recomeçar o run do zero em cima do trabalho que ele acabou de recuperar.
+   */
+  resuming?: boolean
   args?: string[]
-  /** política de permissão do run type (unidade 5) */
+  /** política de permissão já pronta; sem isso, a do tipo de run */
   permissions?: Record<string, unknown>
   /** quem abriu este agente; vira a seta no canvas (o `after` da unidade 4) */
   parentId?: string | null
@@ -512,7 +548,6 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
   const id = randomUUID()
   const cols = opts.cols && opts.cols > 1 ? Math.floor(opts.cols) : 100
   const rows = opts.rows && opts.rows > 1 ? Math.floor(opts.rows) : 30
-  const model = opts.model ?? null
 
   // A tela de confiança aparece antes de qualquer hook: se a pasta nunca foi
   // aceita, o card já nasce dizendo isso em vez de mentir `starting`.
@@ -524,6 +559,18 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
   // começo de um run, e um helper pertence ao run de quem o abriu.
   const parent = parentId ? agents.get(parentId)?.agent : undefined
   const runId = opts.runId || parent?.runId || newRunId()
+  // O tipo é do RUN, não do agente: um helper não escolhe a política em que
+  // nasce — ele herda a de quem o abriu. Só o agente raiz define o tipo.
+  const type = opts.runType ?? parent?.runType ?? DEFAULT_RUN_TYPE
+  const role = opts.role?.trim() || null
+
+  // "auto" (`undefined`) é o default: quem decide é o tipo de run, pelo papel,
+  // com a tabela de roteamento no fim. Uma escolha explícita — inclusive o
+  // "padrão da conta", que é `null` — vence sem passar por aqui.
+  const auto = opts.model === undefined ? defaultModelForRole(role, type) : null
+  const model = auto ? auto.model : (opts.model as AgentModel)
+  const modelReason = opts.modelReason?.trim() || auto?.reason || null
+
   const spot = placeAgent(parentId)
   const layout: AgentLayout = {
     x: opts.layout?.x ?? spot.x,
@@ -551,9 +598,10 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
     sessionId: null,
     live: true,
     model,
-    modelReason: opts.modelReason?.trim() || null,
+    modelReason,
     runId,
-    role: opts.role?.trim() || null,
+    runType: type,
+    role,
     note: null,
     waitingTool: null,
     layout,
@@ -564,8 +612,16 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
   const { term, serializer } = makeScreen(cols, rows)
   const live: Live = { agent, pty: null, subscribers: new Set(), term, serializer, stopping: false }
 
+  // A política é montada AQUI, e não no tipo de run sozinho, porque ela
+  // depende de coisas que só existem agora: o diretório deste run (pro agente
+  // ler o próprio brief sem prompt) e se este agente é o lead (que é quem pode
+  // abrir helpers). Um `permissions` explícito vence — é o cano que o teste
+  // usa pra provocar uma política à mão.
+  const context = { runId, isLead: !parentId, role, subject: opts.subject ?? null, cwd }
+  const permissions = opts.permissions ?? runType(type).policy(context)
+
   // Os hooks sobem com a sessão: sem o --settings o agente é um terminal cego.
-  const settingsFile = writeAgentSettings(id, opts.permissions ? { permissions: opts.permissions } : {})
+  const settingsFile = writeAgentSettings(id, permissions ? { permissions } : {})
   // E o MCP sobe junto: é por ele que um lead abre helpers e que um helper
   // conclui. O header do arquivo é a identidade do agente nas tool calls.
   const mcpFile = writeAgentMcpConfig(id)
@@ -613,12 +669,32 @@ export function createAgent(opts: SpawnOptions = {}): Agent {
     persist()
   })
 
+  // O brief do LEAD. O do helper é escrito pelo `spawn_helper`, porque lá o
+  // texto vem do lead; aqui ele vem do tipo de run, que é o que um agente
+  // aberto pela gaveta tem no lugar de alguém que o instruiu.
+  //
+  // Vai pela mesma fila do resto: a TUI ainda não subiu quando o pty nasce, e
+  // texto digitado antes dela se perde. Sai quando a sessão chegar a `idle`.
+  if (!parentId && !opts.resuming) {
+    const brief = leadBrief(type, context)
+    if (brief) {
+      try {
+        const file = writeLeadBrief(runId, agent, brief)
+        sendToAgent(id, 'brief', `Leia seu brief em ${file} e siga.`, Date.now() + config.briefGraceMs)
+      } catch (err) {
+        // Um brief que não se escreve não pode impedir o agente de existir: a
+        // sessão é utilizável sem ele, só sem a orientação do tipo de run.
+        console.error('falhou escrever o brief do lead:', err instanceof Error ? err.message : err)
+      }
+    }
+  }
+
   // A coluna de helpers é uma pilha, e um agente novo entrou nela.
   relayout()
   persist()
   console.log(
     `+ agente ${agent.name} (${id.slice(0, 8)}) ${cols}x${rows} modelo=${model ?? 'conta'} cwd=${cwd}` +
-      ` run=${runId}` +
+      ` run=${runId} tipo=${type}` +
       (agent.role ? ` papel=${agent.role}` : '') +
       (trusted === false ? '  [pasta não confiada — a sessão vai parar na tela de trust]' : ''),
   )
@@ -648,8 +724,12 @@ export function resumeAgent(id: string): Agent | null {
     modelReason: old.modelReason,
     role: old.role,
     // A sessão reabre no MESMO run: o resultado e o log dela continuam no
-    // diretório onde o resto do run está.
+    // diretório onde o resto do run está, e a política é a mesma — um reviewer
+    // que voltasse freeform depois de um reinício seria a fronteira se
+    // dissolvendo justamente no caminho de recuperação.
     runId: old.runId,
+    runType: old.runType,
+    resuming: true,
     args: ['--resume', old.sessionId],
     // A janela não pode pular de lugar só porque a sessão reabriu: o canvas é
     // memória espacial, e um card que se move sozinho apaga o que você lembrava.
