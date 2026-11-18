@@ -73,12 +73,18 @@ Hooks são o mecanismo do Claude Code pra executar algo em pontos fixos da sess�
 
 O lead orquestra pelos tools do servidor MCP; o daemon sabe quem chama pelo header e resolve o run a que o agente pertence.
 
-- `spawn_helper({name, role, cwd?, brief, after?})` — escreve o brief em arquivo, abre o helper no mesmo run e devolve o id. `after` nomeia o agente de que este depende e vira a seta no canvas. Um run tem um limite de helpers simultâneos (default 3, configurável); acima disso o spawn entra numa fila e o tool devolve "na fila" em vez de bloquear.
+- `spawn_helper({name, role, cwd?, brief, after?, model?, model_reason?})` — escreve o brief em arquivo, abre o helper no mesmo run e devolve o id. `after` nomeia o agente de que este depende e vira a seta no canvas. Um run tem um limite de helpers simultâneos (default 3, configurável); acima disso o spawn entra numa fila e o tool devolve "na fila" em vez de bloquear.
 - `list_helpers()` / `close_helper(id)` / `get_run()` — leitura e encerramento.
 - `report({status, summary})` — atualiza o card do agente no canvas; é o canal de progresso.
 - `done({result, worktrees?})` — o daemon salva o `result` como markdown no diretório do run, marca o agente `done` e gera a notificação pro lead.
 
 Quando `done` ou `report` gera uma mensagem pro lead, a entrega é por injeção no stdin do pty dele, na forma fixa `[worldbige] helper "<name>" concluiu: <summary>. Resultado em <caminho>.` seguida de Enter. A regra de entrega: se o lead já está `idle` no momento em que a mensagem chega, ela é digitada na hora, sem esperar Stop ou `idle_prompt`; senão entra na fila, e a fila é drenada no próximo Stop ou `idle_prompt` do lead. `permission_prompt` nunca entrega — nada é digitado por cima de um prompt de permissão aberto. O `idle_prompt` como ponto de entrega fecha o caso em que o lead ficou parado antes de a mensagem existir e nenhum Stop novo viria. Consideramos e descartamos polling de `get_run()` pelo lead (queima tokens num loop que dorme) e um tool MCP bloqueante de "espere um evento" (esbarra no timeout de tool do cliente).
+
+### O modelo de cada agente
+
+Cada agente roda num modelo escolhido no spawn e passado como `--model`, e o modelo em uso aparece no cabeçalho da janela junto com o motivo da escolha — um agente no modelo errado é invisível de outro jeito, e sem o motivo "por que esse helper está em opus" só se responde lendo transcript. A escolha é automática por padrão, numa ordem só, resolvida num ponto só (a criação do agente): a escolha explícita (o dropdown do "novo agente" ou o `model` do `spawn_helper`) → o default que o tipo de run fixa pro papel → a tabela de roteamento pelo papel → a linha `*` da tabela, que diz "na dúvida, sonnet".
+
+A tabela mora em `config/model-routing.md`, um markdown editável relido por mtime: editar com o daemon no ar já vale pro próximo helper. É markdown e não JSON porque tem dois leitores — o daemon, que casa a primeira linha cuja palavra apareça no papel, e o lead, cujo brief manda lê-la antes de escolher — e a prosa em volta da tabela é metade do conteúdo. Como o casamento é por palavra contida e a ordem das linhas é a ordem da decisão, uma linha mais específica precisa vir antes da geral. "Auto" (ninguém escolheu) e "padrão da conta" (a escolha explícita de não passar `--model`) são valores distintos e não podem colapsar.
 
 ### Permissão por tipo de run
 
@@ -89,10 +95,13 @@ A política do reviewer de PR:
 - Arquivos e edição: `Edit`, `Write` e `NotebookEdit` em deny. A saída do reviewer é `done({result})` — quem escreve o arquivo é o daemon.
 - Bash: allowlist de leitura (`git log`, `git diff`, `gh pr view`, `gh pr diff` e afins) em allow; os prefixos que escrevem (`git push`, `git commit`, `gh pr comment`, `gh pr review`) em deny. A doc é explícita em que regra sobre texto de comando não é fronteira de segurança — `git -C . push` passa pelo deny — então essas duas listas são redução de superfície e de fricção, não a garantia.
 - Conectores (Linear, Slack): mantidos — o reviewer precisa ler o ticket pra checar se o PR faz o que foi pedido. Tools de leitura (`mcp__claude_ai_Linear__get_*`, `list_*`, `search_*`) em allow; tools de escrita (`save_*`, `create_*`, `delete_*`, e os equivalentes do Slack) em ask.
-- MCP do worldbige: só `report` e `done` em allow — helper não abre helper.
+- MCP do worldbige: no helper, só `report` e `done` em allow e `spawn_helper` em deny — helper não abre helper. O lead do mesmo run recebe os seis tools, porque sem `spawn_helper` ele não é lead; por isso a política é montada por agente, não só por run.
+- Brief: `Read` do diretório do run em allow, pra que nenhum agente peça permissão pra ler o próprio brief, que mora fora do cwd. No Windows a regra precisa da forma absoluta do Claude Code — duas barras e caminho normalizado pra POSIX, `Read(//c/.../runs/<run>/**)`; com uma barra só ela ancora no diretório do arquivo de settings.
 - Todo o resto cai no modo padrão, que pergunta no primeiro uso de cada tool.
 
-A fronteira real é a última linha somada ao ask: o que escapar dos denies não executa sozinho — o prompt de permissão aparece na sessão, o hook PermissionRequest acende `precisa de você` no card com o nome do tool, e eu aprovo ou nego na hora. Consideramos e descartamos duas alternativas: `--strict-mcp-config`, que cortaria a escrita no Slack mas levaria junto a leitura do Linear que o review exige; e o modo plan, que mantém o agente propondo planos que ninguém vai aprovar. Um run freeform sobe sem política: conectores presentes, modo padrão da conta.
+A fronteira real é a última linha somada ao ask: o que escapar dos denies não executa sozinho — o prompt de permissão aparece na sessão, o hook PermissionRequest acende `precisa de você` no card com o nome do tool, e eu aprovo ou nego na hora. Consideramos e descartamos duas alternativas: `--strict-mcp-config`, que cortaria a escrita no Slack mas levaria junto a leitura do Linear que o review exige; e o modo plan, que mantém o agente propondo planos que ninguém vai aprovar. Um run freeform sobe sem política: conectores presentes, modo padrão da conta. A única regra que ele carrega é o allow do diretório do run, que não restringe nada.
+
+O tipo de run fica gravado na ficha de cada agente, não só na do lead: depois de um reinício do daemon, um helper aberto num run retomado precisa subir com a mesma política, e o lead que o abriu pode nem estar vivo. O resume carrega o tipo adiante pelo mesmo motivo — um reviewer que voltasse freeform seria a fronteira se dissolvendo justamente no caminho de recuperação.
 
 ### O canvas
 
@@ -114,7 +123,9 @@ A injeção no stdin do lead pode colidir com o que está acontecendo no termina
 
 O daemon é um processo só, e a morte dele leva todos os ptys juntos — no meio de um run, isso é todo agente trabalhando interrompido. A mitigação é o caminho de resume: o Claude Code persiste o transcript de cada sessão por conta própria, o daemon guarda o `session_id` de cada agente desde o SessionStart, e depois do reinício cada card volta `stopped` com o resume reabrindo a sessão onde parou. O que se perde é o scrollback do buffer (o transcript da sessão sobrevive) e o que estava na fila de notificação, que é regravada pelos `done` ainda não entregues no estado.
 
-A política de permissão do reviewer não é fronteira de segurança no sentido forte, e o documento não finge que é. Regras sobre texto de comando são contornáveis por construção (`git -C . push` passa pelo deny de `git push`), e dois comportamentos que o desenho assume têm gap na doc — a resposta neutra do PermissionRequest tipo http preservando o fluxo, e globs parciais em `ask`. A fronteira real é o modo padrão forçado pela política somada ao humano no loop: o que não casa com `allow` pergunta, o prompt acende `precisa de você`, e nada executa sozinho. Os dois gaps têm verificação nomeada na task de permissões.
+A política de permissão do reviewer não é fronteira de segurança no sentido forte, e o documento não finge que é. Regras sobre texto de comando são contornáveis por construção (`git -C . push` passa pelo deny de `git push`), e dois comportamentos que o desenho assumia tinham gap na doc — a resposta neutra do PermissionRequest tipo http preservando o fluxo, e globs parciais em `ask`. A fronteira real é o modo padrão forçado pela política somada ao humano no loop: o que não casa com `allow` pergunta, o prompt acende `precisa de você`, e nada executa sozinho. Os dois gaps foram verificados na task de permissões, antes de qualquer política ser escrita, e passaram (ver Em aberto).
+
+Um caso que a execução encontrou: um `cd` pra fora do diretório de trabalho é tratado como leitura daquele caminho e pede aprovação, e num comando composto todo pedaço precisa estar liberado. Liberar `Bash(cd:*)` dissolveria a fronteira que o modo padrão segura; a resposta é abrir o reviewer no repo que ele vai revisar.
 
 ## Tasks e estimativa
 
@@ -135,4 +146,10 @@ A ordem é 1 → 2 → 3, porque cada uma é o chão da seguinte; a partir daí 
 
 ## Em aberto
 
-1. Os dois gaps de doc assumidos pelo desenho — a resposta neutra do PermissionRequest tipo http preservando o fluxo de permissão, e globs parciais em `ask` — com verificação nomeada na task 7. Dono: Enzo.
+Nada em aberto no v1. O único item que havia — os dois gaps de doc assumidos pelo desenho — foi fechado na task 7, num daemon isolado com `claude` de verdade, antes de qualquer política ser escrita:
+
+1. **PermissionRequest `http` com resposta neutra preserva o fluxo** — o prompt aparece inteiro e funcional na TUI, e ainda cita a regra que o causou (`Permission rule mcp__claude_ai_Linear__save_* requires confirmation for this tool.`). De passagem: negar não dispara hook nenhum, então o card só sai de `precisa de você` porque o daemon vê a tecla passar pelo WebSocket.
+2. **Glob parcial em `ask`** — `mcp__claude_ai_Linear__save_*` casa com `save_issue`. A fronteira, hoje na doc: `allow` aceita glob só depois de um `mcp__<servidor>__` literal, enquanto `deny` e `ask` aceitam glob na posição do nome inteiro.
+3. **Regra de caminho no Windows** (não estava nomeado aqui, e era o risco do allow do diretório do run) — duas barras pra caminho absoluto, normalizado pra POSIX com drive minúsculo e sem os dois pontos.
+
+De brinde, também medidos: o `defaultMode` forçado sobe a sessão em modo manual por cima de uma conta em auto mode, e `Edit`/`Write` em deny sem parênteses removem as ferramentas do contexto da sessão em vez de só negá-las no uso.
