@@ -1,0 +1,11 @@
+worldbige
+Copyright 2026 Enzo Oliveira
+
+Este produto inclui código derivado do ccanvas
+(https://github.com/DevoidSloth/ccanvas),
+Copyright 2026 DevoidSloth, licenciado sob a Apache License 2.0.
+
+Os arquivos derivados do ccanvas carregam o aviso de atribuição no topo.
+São eles a matemática de pan/zoom do canvas, o chrome de janela
+(arrastar, redimensionar, z-order) e a fiação do xterm com o transporte
+de terminal.

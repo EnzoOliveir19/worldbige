@@ -1,1 +1,20 @@
+# a pedreira: clone do ccanvas, consultado mas nunca versionado aqui
 ref/
+
+node_modules/
+dist/
+
+# dados de runtime: estado, resultados de run, briefs gerados.
+# Contêm conteúdo das sessões — nunca entram no repo público.
+data/
+
+# material da Oncar: documento de convenções da arquitetura e briefs reais,
+# que citam repos internos. O repo público funciona só com os exemplos.
+private/
+
+# scratch local
+*.log
+.DS_Store
+
+# rascunho de mensagem de commit do executor
+llms/commitmsg.md
